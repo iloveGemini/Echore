@@ -246,6 +246,33 @@ export class EchoreDatabase {
     }));
   }
 
+  getEventLogsByDate(dateStr: string): EventLogRecord[] {
+    const rows = this.sqlite
+      .query(
+        `SELECT id, timestamp, role, speaker, content, metadata_json
+         FROM event_log
+         WHERE timestamp LIKE ?
+         ORDER BY timestamp ASC, rowid ASC`,
+      )
+      .all(`${dateStr}%`) as Array<{
+      id: string;
+      timestamp: string;
+      role: "user" | "assistant" | "solitary" | "system";
+      speaker: string;
+      content: string;
+      metadata_json: string;
+    }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      timestamp: r.timestamp,
+      role: r.role,
+      speaker: r.speaker,
+      content: r.content,
+      metadata: JSON.parse(r.metadata_json || "{}"),
+    }));
+  }
+
   private static readonly CJK_STOP_PARTICLES = new Set([
     "的",
     "了",

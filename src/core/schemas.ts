@@ -51,7 +51,7 @@ export const PersonaConfigSchema = z.object({
   sliders: PersonaSlidersSchema.optional(),
   mood_action_slots: MoodActionSlotsSchema.partial().optional(),
 });
-export type PersonaConfig = z.infer<typeof PersonaConfigSchema>;
+export type PersonaConfig = z.input<typeof PersonaConfigSchema>;
 
 export const HormoneStateSchema = z.object({
   cortisol: z.number().min(0).max(1),
@@ -187,6 +187,79 @@ export const SubconsciousHandoverSchema = z.object({
   脑子里盘旋的事: z.array(SubconsciousHandoverItemSchema).max(3),
 });
 export type SubconsciousHandover = z.infer<typeof SubconsciousHandoverSchema>;
+
+export const ConcernVerdictActionSchema = z.enum([
+  "keep_active",
+  "settle_resolved",
+  "fade_minor_worry",
+  "escalate_cold_war",
+  "crystallize_scar",
+]);
+export type ConcernVerdictAction = z.infer<typeof ConcernVerdictActionSchema>;
+
+export const ScarRuleSpecSchema = z.object({
+  slot_tag: z.string().min(1),
+  description: z.string().min(1),
+  source_event_id: z.string().regex(/^log-/),
+});
+export type ScarRuleSpec = z.infer<typeof ScarRuleSpecSchema>;
+
+export const ConcernSettlementItemSchema = z.object({
+  concern_id: z.string().min(1),
+  action: ConcernVerdictActionSchema,
+  previous_tier: ConcernTierSchema,
+  next_tier: ConcernTierSchema,
+  previous_status: MemoryStatusSchema,
+  next_status: MemoryStatusSchema,
+  summary: z.string().min(1),
+  source_event_id: z.string().regex(/^log-/),
+  created_at: z.string(),
+  age_days: z.number().int().min(0),
+  reason: z.string().min(1),
+  scar_rule: ScarRuleSpecSchema.optional(),
+});
+export type ConcernSettlementItem = z.infer<typeof ConcernSettlementItemSchema>;
+
+export const EndocrineNightVerdictSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  items: z.array(ConcernSettlementItemSchema),
+  hormone_bounds_after: z.object({
+    floor_cort: z.number().min(0).max(1),
+    cap_ox: z.number().min(0).max(1),
+  }),
+});
+export type EndocrineNightVerdict = z.infer<typeof EndocrineNightVerdictSchema>;
+
+export const CompiledMemorySpecSchema = z.object({
+  rel_path: z
+    .string()
+    .regex(/^(?:people|events|concerns)\/[a-zA-Z0-9_-]+\.md$/),
+  id: z.string().min(1),
+  type: MemoryTypeSchema,
+  tier: z.union([ConcernTierSchema, z.literal("normal")]).optional(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  status: MemoryStatusSchema,
+  supersedes: z.string().optional(),
+  source_event_id: z.string().optional(),
+  category: MemoryCategorySchema,
+  allow_forget: z.boolean().default(true),
+  assertions: z.array(z.string().min(1)).min(1),
+  frontstage_narrative: z.string().optional(),
+});
+export type CompiledMemorySpec = z.input<typeof CompiledMemorySpecSchema>;
+
+export const RapportRuleSpecSchema = z.object({
+  section: z.enum(["专属称呼与黑话", "语感与边界默契", "结痂雷区"]),
+  predicate_line: z.string().min(1),
+  source_event_id: z.string().regex(/^log-/),
+});
+export type RapportRuleSpec = z.infer<typeof RapportRuleSpecSchema>;
+
+export const CompilationPlanSchema = z.object({
+  memories: z.array(CompiledMemorySpecSchema).default([]),
+  rapport_rules: z.array(RapportRuleSpecSchema).default([]),
+});
+export type CompilationPlan = z.input<typeof CompilationPlanSchema>;
 
 const LOG_ID_LEAK_RE = /\blog-\d{4,}[-\w]*\b/i;
 const HORMONE_FLOAT_LEAK_RE =

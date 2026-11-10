@@ -1,9 +1,12 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { Clock } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
+  type CompilationPlan,
   type ConcernRecord,
+  type EndocrineNightVerdict,
   type HormoneState,
   type PersonaConfig,
   type PulseEvaluation,
@@ -18,14 +21,35 @@ import {
   applyEndocrineCalibrationGates,
   type EndocrineTurnOutcome,
 } from "../endocrine/evaluator.ts";
-import { buildSubconsciousHandover } from "../endocrine/handover.ts";
+import {
+  buildSubconsciousHandover,
+  settleNightlyConcerns,
+} from "../endocrine/handover.ts";
 import {
   createInitialHormoneState,
   stepHormones,
 } from "../endocrine/hormones.ts";
-import { appendHotJournalEntry } from "../frontstage/journal.ts";
+import {
+  appendHotJournalEntry,
+  synthesizeBedtimeReflection,
+} from "../frontstage/journal.ts";
 import { performFrontstageTurn } from "../frontstage/performer.ts";
 import { createSilentWorkerTool } from "../frontstage/silent-worker.ts";
+import {
+  type NightlyCompileResult,
+  reconcileSynchronicLinksToInactiveFiles,
+  runNightlyCompiler,
+} from "../hippocampus/compiler.ts";
+import {
+  type DecayArchiveReport,
+  reconsolidateRecalledMemories,
+  runDailyMemoryDecayAndArchive,
+  syncMemoryMetaFromFiles,
+} from "../hippocampus/decay.ts";
+import {
+  type LintReport,
+  runMemoryLinter,
+} from "../hippocampus/linter.ts";
 import {
   type RecallResult,
   recallMemories,
@@ -65,6 +89,86 @@ export interface ReactiveTurnOutput {
   endocrineOutcome: EndocrineTurnOutcome;
   journalEntry: string;
   sandwichRequest: SandwichRequest;
+}
+
+export interface SleepCycleOptions {
+  /** 可选直接指定前台睡前自省冷叙事文本（不传则由 frontstage 模型汇总当日热记事生成） */
+  overrideReflectionText?: string;
+  /** 可选直接注入记忆官编译计划（不传则由 compiler 模型根据今日日志生成） */
+  compilationPlanOverride?: CompilationPlan;
+  /** 本轮衰减跨越天数（默认 1 天） */
+  elapsedDecayDays?: number;
+  /** 是否在 L1~L6 体检通过后对独立记忆仓执行 git commit（默认 true） */
+  autoGitCommit?: boolean;
+}
+
+export interface SleepCycleOutput {
+  dateStr: string;
+  coldReflection: string;
+  verdict: EndocrineNightVerdict;
+  compileResult: NightlyCompileResult;
+  decayReport: DecayArchiveReport;
+  lintReport: LintReport;
+  gitCommitHash: string | null;
+}
+
+function commitStandaloneMemoryRepo(
+  memoryDir: string,
+  dateStr: string,
+): string | null {
+  const resolvedMem = path.resolve(memoryDir);
+  const resolvedCwd = path.resolve(process.cwd());
+  // 安全护栏：绝不在源码主仓目录内直接初始化或污染宿主 git 历史
+  if (
+    resolvedMem === resolvedCwd ||
+    resolvedMem.startsWith(`${resolvedCwd}${path.sep}`)
+  ) {
+    return null;
+  }
+
+  const gitDir = path.join(resolvedMem, ".git");
+  if (!fs.existsSync(gitDir)) {
+    const initRes = spawnSync("git", ["init"], {
+      cwd: resolvedMem,
+      encoding: "utf8",
+    });
+    if (initRes.status !== 0) return null;
+    spawnSync("git", ["config", "user.name", "Echore Hippocampus"], {
+      cwd: resolvedMem,
+    });
+    spawnSync("git", ["config", "user.email", "hippocampus@echore.local"], {
+      cwd: resolvedMem,
+    });
+  }
+
+  spawnSync("git", ["add", "-A"], { cwd: resolvedMem });
+  const statusRes = spawnSync("git", ["status", "--porcelain"], {
+    cwd: resolvedMem,
+    encoding: "utf8",
+  });
+  if (!statusRes.stdout || !statusRes.stdout.trim()) {
+    const headRes = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: resolvedMem,
+      encoding: "utf8",
+    });
+    return headRes.status === 0 ? headRes.stdout.trim() : null;
+  }
+
+  const commitRes = spawnSync(
+    "git",
+    ["commit", "-m", `chore(memory): nightly sleep consolidation ${dateStr}`],
+    {
+      cwd: resolvedMem,
+      encoding: "utf8",
+    },
+  );
+  if (commitRes.status !== 0) return null;
+
+  const revRes = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+    cwd: resolvedMem,
+    encoding: "utf8",
+  });
+  return revRes.status === 0 ? revRes.stdout.trim() : null;
 }
 
 /**
@@ -295,6 +399,18 @@ export class EchoreEngine {
       this.db,
     );
 
+    // §4.3 再巩固正反馈（正向互动 +0.05，负面冲突/未落定牵挂只增 access_count 绝不上调 strength）
+    const isNegativeOrConflictTurn =
+      rawPulse.is_conflict ||
+      endocrineOutcome.hormoneState.cortisol > steppedHormones.cortisol;
+    reconsolidateRecalledMemories({
+      db: this.db,
+      memoryDir: this.memoryDir,
+      recalledItems: recalled.items,
+      isNegativeOrConflictTurn,
+      now,
+    });
+
     const handover = buildSubconsciousHandover({
       hormoneState: endocrineOutcome.hormoneState,
       profile: this.profile,
@@ -337,8 +453,8 @@ export class EchoreEngine {
     });
 
     // Step 5: 追加当日 journal/YYYY-MM-DD.md 第一人称热记事
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
+    const hh = String(now.getUTCHours()).padStart(2, "0");
+    const mm = String(now.getUTCMinutes()).padStart(2, "0");
     const journalEntry = appendHotJournalEntry({
       memoryDir: this.memoryDir,
       dateStr: this.clock.todayStr(),
@@ -357,6 +473,115 @@ export class EchoreEngine {
       endocrineOutcome,
       journalEntry,
       sandwichRequest: performance.sandwichRequest,
+    };
+  }
+
+  /**
+   * 【环 3：昼夜新陈代谢环 Circadian Sleep Loop】（§1.2 & §6.4）
+   * Step 1 [前台] 汇总当日交互与独居热记事，撰写第一人称睡前自省冷叙事（保住自传产权）
+   * Step 2 [情绪官] 肝脏结算：出具《情绪结转裁决单》(T1 满 7 天淡化 / T2 满 5 天转冷战封顶 / T3 满 21 天留疤 / 日内和解落定)
+   * Step 3 [记忆官] 唯一编译器：更新 people/ events/ concerns/ rapport.md，维护 supersedes 取代链并保留前台原叙
+   * Step 4 [系统] 分品类定步长衰减 + status:已沉底 归档 + 跑通 L1~L6 体检 + 自动 git commit
+   */
+  async runSleepCycle(
+    options: SleepCycleOptions = {},
+  ): Promise<SleepCycleOutput> {
+    const now = this.clock.now();
+    const dateStr = this.clock.todayStr();
+
+    const currentHormones = stepHormones({
+      state: this.db.getHormoneState(),
+      profile: this.profile,
+      now,
+      activeConcerns: this.db.listActiveConcerns(),
+    });
+    this.db.saveHormoneState(currentHormones);
+
+    const currentHandover = buildSubconsciousHandover({
+      hormoneState: currentHormones,
+      profile: this.profile,
+      activeConcerns: this.db.listActiveConcerns(),
+      db: this.db,
+      now,
+    });
+
+    // Step 1: [前台] 撰写第一人称睡前自省冷叙事
+    const coldReflection = await synthesizeBedtimeReflection({
+      router: this.router,
+      profile: this.profile,
+      memoryDir: this.memoryDir,
+      dateStr,
+      now,
+      handover: currentHandover,
+      overrideReflectionText: options.overrideReflectionText,
+    });
+
+    // Step 2: [情绪官] 夜间肝脏结算，出具《情绪结转裁决单》
+    const verdict = settleNightlyConcerns({
+      db: this.db,
+      profile: this.profile,
+      now,
+    });
+
+    // Step 3: [记忆官] 唯一 Markdown 编译器落盘结构化断言与 rapport.md
+    const compileResult = await runNightlyCompiler({
+      memoryDir: this.memoryDir,
+      db: this.db,
+      router: this.router,
+      now,
+      dateStr,
+      verdict,
+      coldReflection,
+      planOverride: options.compilationPlanOverride,
+    });
+
+    // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L6 终检 + git commit
+    const decayReport = runDailyMemoryDecayAndArchive({
+      memoryDir: this.memoryDir,
+      db: this.db,
+      now,
+      elapsedDays: options.elapsedDecayDays ?? 1,
+    });
+
+    if (decayReport.archivedIds.length > 0) {
+      reconcileSynchronicLinksToInactiveFiles({
+        memoryDir: this.memoryDir,
+      });
+      syncMemoryMetaFromFiles({
+        memoryDir: this.memoryDir,
+        db: this.db,
+        now,
+      });
+    }
+
+    const lintReport = runMemoryLinter({
+      memoryDir: this.memoryDir,
+      db: this.db,
+      now,
+    });
+
+    if (!lintReport.passed) {
+      const details = lintReport.issues
+        .map((i) => `[${i.rule}] ${i.file}: ${i.message}`)
+        .join("; ");
+      throw new Error(
+        `[MemoryCILinterFailed] 夜间冷写未通过 L1~L6 机检守卫，拒绝提交: ${details}`,
+      );
+    }
+
+    const gitCommitHash =
+      options.autoGitCommit !== false
+        ? commitStandaloneMemoryRepo(this.memoryDir, dateStr)
+        : null;
+
+    return {
+      dateStr,
+      coldReflection,
+      verdict,
+      compileResult,
+      decayReport,
+      lintReport,
+      gitCommitHash,
     };
   }
 }

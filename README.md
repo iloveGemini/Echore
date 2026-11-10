@@ -43,11 +43,11 @@
 | **多模型路由与工具环 (`src/llm/`)** | 极薄双 Adapter（Anthropic + OpenAI 兼容）、Zod `toolRunner`、按岗位模型混搭路由、三明治缓存组装 | ✅ 已完成 (M1) | [总纲 §6.6, §7.2](notes/design/architecture-and-memory-spec.md) |
 | **底座与骨层存储 (`src/core/`)** | `VirtualClock` 虚拟时钟、`bun:sqlite` 事件日志/激素表/牵挂表、Zod 核心契约 | ✅ 已完成 (M1) | [总纲 §3.1, §7.3](notes/design/architecture-and-memory-spec.md) |
 | **反射层守卫 (`src/reflex/`)** | 纯代码脊髓守卫：褪黑素睡眠锁、静默窗、连续 2 次主动未回退避锁 | ✅ 已完成 (M1) | [总纲 §1.1](notes/design/architecture-and-memory-spec.md) |
-| **情绪官 (`src/endocrine/`)** | 5 套内分泌原型模板、4 激素双锚点数学引擎、三级牵挂演化（琐事/冷战/留疤）、出厂前四道调准、交接单 | ✅ 热路径已完成 (M1) / 📐 夜结算待施工 (M2) | [总纲 §2](notes/design/architecture-and-memory-spec.md) |
-| **记忆官 (`src/hippocampus/`)** | 三桶五路召回、原话引文预水合、唯一 Markdown 编译器、`rapport.md` 内隐默契、定步长衰减沉底、L1–L6 Linter | ✅ 召回与 Linter 已完成 (M1) / 📐 编译器与衰减待施工 (M2) | [总纲 §3, §4, §5](notes/design/architecture-and-memory-spec.md) |
-| **前台与独居 (`src/frontstage/`)** | 实时对话演奏、无声替身 Subagent、独居三行动（S1/S2/S3）、热记事与睡前冷叙事 | ✅ 实时演奏与替身已完成 (M1) / 📐 独居待施工 (M3) | [总纲 §1.1, §6.2, §6.3](notes/design/architecture-and-memory-spec.md) |
+| **情绪官 (`src/endocrine/`)** | 5 套内分泌原型模板、4 激素双锚点数学引擎、三级牵挂演化（琐事/冷战/留疤）、出厂前四道调准、交接单与夜间裁决单 | ✅ 已完成 (M1/M2) | [总纲 §2](notes/design/architecture-and-memory-spec.md) |
+| **记忆官 (`src/hippocampus/`)** | 三桶五路召回、原话引文预水合、唯一 Markdown 编译器、`rapport.md` 内隐默契、定步长衰减沉底、L1–L6 Linter | ✅ 已完成 (M1/M2) | [总纲 §3, §4, §5](notes/design/architecture-and-memory-spec.md) |
+| **前台与独居 (`src/frontstage/`)** | 实时对话演奏、无声替身 Subagent、独居三行动（S1/S2/S3）、热记事与睡前冷叙事 | ✅ 实时演奏/替身/冷叙事已完成 (M1/M2) / 📐 独居待施工 (M3) | [总纲 §1.1, §6.2, §6.3](notes/design/architecture-and-memory-spec.md) |
 | **五官感知层 (`src/perception/`)** | 时空天气边际触发、桌面伴生去噪探针（带隐私黑名单）、RSS/网页世界信息流 | 📐 待施工 (M3) | [总纲 §6.1](notes/design/architecture-and-memory-spec.md) |
-| **三环总控与出差 (`src/loop/`)** | 三环主循环 `EchoreEngine`、MCP Server 出差外壳、CLI 时间快进仿真台 | ✅ 环 1 已完成 (M1) / 📐 环 2/3 待施工 (M2/M3) | [总纲 §6.4, §6.5](notes/design/architecture-and-memory-spec.md) |
+| **三环总控与出差 (`src/loop/`)** | 三环主循环 `EchoreEngine`、MCP Server 出差外壳、CLI 时间快进仿真台 | ✅ 环 1/环 3 已完成 (M1/M2) / 📐 环 2/MCP 待施工 (M3) | [总纲 §6.4, §6.5](notes/design/architecture-and-memory-spec.md) |
 
 ---
 

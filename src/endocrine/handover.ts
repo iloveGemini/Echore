@@ -3,6 +3,9 @@ import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
   type ConcernRecord,
+  type ConcernSettlementItem,
+  type EndocrineNightVerdict,
+  EndocrineNightVerdictSchema,
   type HormoneState,
   type SubconsciousHandover,
   SubconsciousHandoverSchema,
@@ -10,9 +13,12 @@ import {
 import { preHydrateQuotes } from "../hippocampus/pre-hydrator.ts";
 import type { ResolvedEndocrineProfile } from "./archetypes.ts";
 import {
+  clip,
+  computeActiveBounds,
   isDefensiveOrTense,
   isInBoredZone,
   isInMissingZone,
+  stepHormones,
 } from "./hormones.ts";
 
 export interface BuildHandoverParams {
@@ -137,4 +143,219 @@ export function renderHandoverYaml(handover: SubconsciousHandover): string {
   const rendered = YAML.stringify(handover).trim();
   assertNoInternalLeaks(rendered, "renderHandoverYaml");
   return rendered;
+}
+
+function computeConcernAgeDays(createdAtIso: string, now: Date): number {
+  const startDate = createdAtIso.slice(0, 10);
+  const currentDate = now.toISOString().slice(0, 10);
+  const startMs = new Date(`${startDate}T00:00:00Z`).getTime();
+  const currentMs = new Date(`${currentDate}T00:00:00Z`).getTime();
+  return Math.max(0, Math.floor((currentMs - startMs) / (24 * 3600 * 1000)));
+}
+
+function deriveScarSlotTag(summary: string): string {
+  const cjkMatches = summary.match(/[一-龥]{2,6}/g);
+  const core = cjkMatches?.[0] ?? "过往冲突";
+  return core.endsWith("敏感") ? core : `${core}敏感`;
+}
+
+/**
+ * §1.2 夜相 Step 2 & §2.4：情绪官夜间肝脏结算，出具《情绪结转裁决单》
+ * 铁律：情绪官只更新 SQLite 状态表并输出结构化裁决单，绝不直接写 Markdown 文件。
+ * - 日内已快代谢和解 (`status === "已落定"`) -> `settle_resolved`
+ * - T1 (`minor_worry`) 满 7 天仍为 `有效` -> `fade_minor_worry` (`status: 已淡化`)
+ * - T2 (`conflict`) 满 5 天仍为 `有效(急性)` -> `escalate_cold_war` (`status: 僵持待解`, 开启 Cap_ox = B_ox - 0.15)
+ * - T2 (`conflict`) 满 21 天未解 -> `crystallize_scar` (`tier: scar`, `status: 已结痂`, 释放日常 Cap_ox 并附 `scar_rule`)
+ */
+export function settleNightlyConcerns(params: {
+  db: EchoreDatabase;
+  profile: ResolvedEndocrineProfile;
+  now: Date;
+}): EndocrineNightVerdict {
+  const { db, profile, now } = params;
+  const nowIso = now.toISOString();
+  const dateStr = nowIso.slice(0, 10);
+
+  const allConcerns = db.listAllConcerns();
+  const items: ConcernSettlementItem[] = [];
+
+  for (const c of allConcerns) {
+    const ageDays = computeConcernAgeDays(c.created_at, now);
+
+    if (c.status === "已落定") {
+      items.push({
+        concern_id: c.id,
+        action: "settle_resolved",
+        previous_tier: c.tier,
+        next_tier: c.tier,
+        previous_status: "已落定",
+        next_status: "已落定",
+        summary: c.summary,
+        source_event_id: c.source_event_id,
+        created_at: c.created_at,
+        age_days: ageDays,
+        reason: "日内已说开并完成快代谢，夜间正式结转落定",
+      });
+      continue;
+    }
+
+    if (c.status !== "有效" && c.status !== "僵持待解") {
+      continue;
+    }
+
+    if (c.tier === "minor_worry") {
+      if (ageDays >= 7) {
+        const updated: ConcernRecord = {
+          ...c,
+          status: "已淡化",
+          floor_cort: 0,
+          cap_ox: 1.0,
+          updated_at: nowIso,
+        };
+        db.upsertConcern(updated);
+        items.push({
+          concern_id: c.id,
+          action: "fade_minor_worry",
+          previous_tier: "minor_worry",
+          next_tier: "minor_worry",
+          previous_status: c.status,
+          next_status: "已淡化",
+          summary: c.summary,
+          source_event_id: c.source_event_id,
+          created_at: c.created_at,
+          age_days: ageDays,
+          reason: `T1 日常微澜已满 ${ageDays} 天自然翻篇，归档为已淡化`,
+        });
+      } else {
+        items.push({
+          concern_id: c.id,
+          action: "keep_active",
+          previous_tier: "minor_worry",
+          next_tier: "minor_worry",
+          previous_status: c.status,
+          next_status: "有效",
+          summary: c.summary,
+          source_event_id: c.source_event_id,
+          created_at: c.created_at,
+          age_days: ageDays,
+          reason: `T1 日常微澜未满 7 天（当前 ${ageDays} 天），保持有效惦记`,
+        });
+      }
+      continue;
+    }
+
+    if (c.tier === "conflict") {
+      if (ageDays >= 21) {
+        const updated: ConcernRecord = {
+          ...c,
+          tier: "scar",
+          status: "已结痂",
+          floor_cort: 0,
+          cap_ox: 1.0,
+          updated_at: nowIso,
+        };
+        db.upsertConcern(updated);
+
+        const slotTag = deriveScarSlotTag(c.summary);
+        items.push({
+          concern_id: c.id,
+          action: "crystallize_scar",
+          previous_tier: "conflict",
+          next_tier: "scar",
+          previous_status: c.status,
+          next_status: "已结痂",
+          summary: c.summary,
+          source_event_id: c.source_event_id,
+          created_at: c.created_at,
+          age_days: ageDays,
+          reason: `T2 冲突已僵持 ${ageDays} 天未解，结转为 T3 已结痂并写入内隐雷区`,
+          scar_rule: {
+            slot_tag: slotTag,
+            description: `曾在 ${c.created_at.slice(0, 10)} 因「${c.summary}」长期未解留疤，再遇同类触发皮质醇敏感度翻倍`,
+            source_event_id: c.source_event_id,
+          },
+        });
+      } else if (c.status === "有效" && ageDays >= 5) {
+        const coldWarFloor = clip(profile.baseline.cortisol + 0.05, 0, 0.6);
+        const coldWarCap = clip(
+          profile.baseline.oxytocin - 0.15,
+          profile.resting_floor.oxytocin,
+          1.0,
+        );
+        const updated: ConcernRecord = {
+          ...c,
+          status: "僵持待解",
+          floor_cort: coldWarFloor,
+          cap_ox: coldWarCap,
+          updated_at: nowIso,
+        };
+        db.upsertConcern(updated);
+        items.push({
+          concern_id: c.id,
+          action: "escalate_cold_war",
+          previous_tier: "conflict",
+          next_tier: "conflict",
+          previous_status: "有效",
+          next_status: "僵持待解",
+          summary: c.summary,
+          source_event_id: c.source_event_id,
+          created_at: c.created_at,
+          age_days: ageDays,
+          reason: `T2 冲突已满 ${ageDays} 天未解，由急性期转为僵持待解（开启冷战催产素封顶 Cap_ox）`,
+        });
+      } else {
+        items.push({
+          concern_id: c.id,
+          action: "keep_active",
+          previous_tier: "conflict",
+          next_tier: "conflict",
+          previous_status: c.status,
+          next_status: c.status,
+          summary: c.summary,
+          source_event_id: c.source_event_id,
+          created_at: c.created_at,
+          age_days: ageDays,
+          reason:
+            c.status === "有效"
+              ? `T2 冲突处于急性应激期（${ageDays} 天 < 5 天）`
+              : `T2 冲突处于冷战僵持期（${ageDays} 天 < 21 天）`,
+        });
+      }
+      continue;
+    }
+
+    items.push({
+      concern_id: c.id,
+      action: "keep_active",
+      previous_tier: c.tier,
+      next_tier: c.tier,
+      previous_status: c.status,
+      next_status: c.status,
+      summary: c.summary,
+      source_event_id: c.source_event_id,
+      created_at: c.created_at,
+      age_days: ageDays,
+      reason: "保持当前状态",
+    });
+  }
+
+  const remainingActive = db.listActiveConcerns();
+  const { floorCort, capOx } = computeActiveBounds(profile, remainingActive);
+  const updatedHormones = stepHormones({
+    state: db.getHormoneState(),
+    profile,
+    now,
+    activeConcerns: remainingActive,
+    overrideDeltaHours: 0,
+  });
+  db.saveHormoneState(updatedHormones);
+
+  return EndocrineNightVerdictSchema.parse({
+    date: dateStr,
+    items,
+    hormone_bounds_after: {
+      floor_cort: floorCort,
+      cap_ox: capOx,
+    },
+  });
 }
