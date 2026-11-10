@@ -261,6 +261,55 @@ export const CompilationPlanSchema = z.object({
 });
 export type CompilationPlan = z.input<typeof CompilationPlanSchema>;
 
+export const WeatherConditionSchema = z.enum([
+  "clear",
+  "cloudy",
+  "rain",
+  "heavy_rain",
+  "storm",
+  "snow",
+  "fog",
+]);
+export type WeatherCondition = z.infer<typeof WeatherConditionSchema>;
+
+export const WeatherSnapshotSchema = z.object({
+  condition: WeatherConditionSchema,
+  temperatureC: z.number(),
+  previousTemperatureC: z.number().optional(),
+  alert: z.string().optional(),
+});
+export type WeatherSnapshot = z.infer<typeof WeatherSnapshotSchema>;
+
+export const SolitaryActionKindSchema = z.enum([
+  "feed_roaming",
+  "hobby_project",
+  "secret_prep",
+]);
+export type SolitaryActionKind = z.infer<typeof SolitaryActionKindSchema>;
+
+export const SolitaryProjectNodeSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  status: z.enum(["done", "in_progress", "pending"]),
+  artifact_path: z.string().optional(),
+  completed_at: z.string().optional(),
+});
+export type SolitaryProjectNode = z.infer<typeof SolitaryProjectNodeSchema>;
+
+export const SolitaryProjectSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  cursor: z.number().int().min(0).default(0),
+  nodes: z.array(SolitaryProjectNodeSchema).min(1),
+});
+export type SolitaryProject = z.infer<typeof SolitaryProjectSchema>;
+
+export const SolitaryProjectsFileSchema = z.object({
+  projects: z.array(SolitaryProjectSchema),
+});
+export type SolitaryProjectsFile = z.infer<typeof SolitaryProjectsFileSchema>;
+
 const LOG_ID_LEAK_RE = /\blog-\d{4,}[-\w]*\b/i;
 const HORMONE_FLOAT_LEAK_RE =
   /\b(?:cortisol|oxytocin|dopamine|melatonin|floor_cort|cap_ox|H_cort|H_ox|H_da|B_cort|B_ox|B_da|F_cort|F_ox|F_da)\b[^\n\r]{0,12}?\d+\.\d+/i;

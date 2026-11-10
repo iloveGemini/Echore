@@ -495,6 +495,17 @@ export class EchoreDatabase {
     );
   }
 
+  markConcernHasPrep(
+    id: string,
+    hasPrep: boolean,
+    updatedAtIso?: string,
+  ): void {
+    const ts = updatedAtIso ?? this.clock.nowIso();
+    this.sqlite
+      .query(`UPDATE concerns SET has_prep = ?, updated_at = ? WHERE id = ?`)
+      .run(hasPrep ? 1 : 0, ts, id);
+  }
+
   listAllConcerns(): ConcernRecord[] {
     const rows = this.sqlite
       .query(`SELECT * FROM concerns ORDER BY updated_at DESC`)

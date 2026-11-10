@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Clock } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
+  assertNoInternalLeaks,
   type CompilationPlan,
   type ConcernRecord,
   type EndocrineNightVerdict,
@@ -11,7 +12,10 @@ import {
   type PersonaConfig,
   type PulseEvaluation,
   PulseEvaluationSchema,
+  type ReflexState,
+  type SolitaryActionKind,
   type SubconsciousHandover,
+  type WeatherSnapshot,
 } from "../core/schemas.ts";
 import {
   type ResolvedEndocrineProfile,
@@ -23,18 +27,31 @@ import {
 } from "../endocrine/evaluator.ts";
 import {
   buildSubconsciousHandover,
+  renderHandoverYaml,
   settleNightlyConcerns,
 } from "../endocrine/handover.ts";
 import {
   createInitialHormoneState,
+  isDefensiveOrTense,
+  isInBoredZone,
+  isInMissingZone,
   stepHormones,
 } from "../endocrine/hormones.ts";
 import {
   appendHotJournalEntry,
+  extractColdReflectionForDate,
   synthesizeBedtimeReflection,
 } from "../frontstage/journal.ts";
-import { performFrontstageTurn } from "../frontstage/performer.ts";
+import {
+  performFrontstageTurn,
+  sanitizeRapportForFrontstage,
+} from "../frontstage/performer.ts";
 import { createSilentWorkerTool } from "../frontstage/silent-worker.ts";
+import {
+  extractSecretPrepForConcern,
+  runSolitaryTick,
+  type SolitaryTickResult,
+} from "../frontstage/solitary.ts";
 import {
   type NightlyCompileResult,
   reconcileSynchronicLinksToInactiveFiles,
@@ -60,7 +77,22 @@ import type {
   SandwichRequest,
   ZodTool,
 } from "../llm/types.ts";
-import { recordUserMessageReceived } from "../reflex/guard.ts";
+import {
+  type ChronoAmbientSlice,
+  evaluateChronoAmbient,
+} from "../perception/chrono-ambient.ts";
+import {
+  type DesktopPresenceResult,
+  type DesktopWindowSample,
+  evaluateDesktopPresence,
+} from "../perception/desktop-probe.ts";
+import type { WorldFeedFetcher } from "../perception/world-feed.ts";
+import {
+  evaluateReflexGuard,
+  type ReflexEvaluation,
+  recordProactiveSent,
+  recordUserMessageReceived,
+} from "../reflex/guard.ts";
 
 export interface EchoreEngineOptions {
   clock: Clock;
@@ -75,6 +107,10 @@ export interface EchoreEngineOptions {
 export interface ReactiveTurnOptions {
   perceptionSlice?: string;
   secretPrepNote?: string;
+  weather?: WeatherSnapshot;
+  desktopSamples?: DesktopWindowSample[];
+  isHolidayOrAnniversary?: string;
+  userActiveLateNight?: boolean;
   /** 可选注入情绪官脉冲评估结果（或由 endocrine 路由模型自动评估） */
   pulseOverride?: Partial<PulseEvaluation>;
 }
@@ -89,6 +125,39 @@ export interface ReactiveTurnOutput {
   endocrineOutcome: EndocrineTurnOutcome;
   journalEntry: string;
   sandwichRequest: SandwichRequest;
+  consumedPrepConcernIds?: string[];
+}
+
+export type HeartbeatBranch = "sleep_cycle" | "proactive" | "solitary" | "idle";
+export type ProactiveTriggerReason =
+  | "weather_or_long_focus"
+  | "secret_prep_ready"
+  | "missing_user";
+
+export interface HeartbeatOptions {
+  weather?: WeatherSnapshot;
+  isHolidayOrAnniversary?: string;
+  userActiveLateNight?: boolean;
+  desktopSamples?: DesktopWindowSample[];
+  solitaryActionKind?: SolitaryActionKind;
+  feedFetcher?: WorldFeedFetcher;
+  overrideProactiveText?: string;
+  overrideSolitaryNoteText?: string;
+  sleepCycleOptions?: SleepCycleOptions;
+}
+
+export interface HeartbeatOutput {
+  branch: HeartbeatBranch;
+  hormoneState: HormoneState;
+  reflexState: ReflexState;
+  reflexEvaluation: ReflexEvaluation;
+  chronoAmbient: ChronoAmbientSlice;
+  desktopPresence: DesktopPresenceResult;
+  proactiveTrigger?: ProactiveTriggerReason;
+  proactiveMessage?: string;
+  proactiveEventId?: string;
+  solitaryResult?: SolitaryTickResult;
+  sleepCycleOutput?: SleepCycleOutput;
 }
 
 export interface SleepCycleOptions {
@@ -214,13 +283,27 @@ export class EchoreEngine {
     return this.appendOnlyHistory;
   }
 
-  private loadRapportMarkdown(): string {
+  appendExternalTurnToHistory(
+    userMessage: string,
+    assistantReply: string,
+  ): void {
+    this.appendOnlyHistory.push({
+      role: "user",
+      content: userMessage,
+    });
+    this.appendOnlyHistory.push({
+      role: "assistant",
+      content: assistantReply,
+    });
+  }
+
+  loadRapportMarkdown(): string {
     const rapportPath = path.join(this.memoryDir, "implicit", "rapport.md");
     if (!fs.existsSync(rapportPath)) return "";
     return fs.readFileSync(rapportPath, "utf8");
   }
 
-  private async evaluatePulseWithOrgan(params: {
+  async evaluatePulseWithOrgan(params: {
     userMessage: string;
     rapportMarkdown: string;
     recentHistory: readonly ChatMessage[];
@@ -343,6 +426,8 @@ export class EchoreEngine {
     const now = this.clock.now();
     const nowIso = this.clock.nowIso();
 
+    const prevReflex = this.db.getReflexState();
+
     // Step 1: 落盘 SQLite Event Log & 更新反射层
     const userEvent = this.db.appendEventLog({
       role: "user",
@@ -351,14 +436,53 @@ export class EchoreEngine {
       timestamp: nowIso,
     });
 
-    const nextReflex = recordUserMessageReceived(
-      this.db.getReflexState(),
-      nowIso,
-    );
+    const nextReflex = recordUserMessageReceived(prevReflex, nowIso);
     this.db.saveReflexState(nextReflex);
 
     const activeConcernsBefore = this.db.listActiveConcerns();
     const rapportMarkdown = this.loadRapportMarkdown();
+
+    // 自动合成感知切片（若调用方未显式覆写 perceptionSlice）
+    let resolvedPerceptionSlice = options.perceptionSlice;
+    if (resolvedPerceptionSlice === undefined) {
+      const chronoSlice = evaluateChronoAmbient({
+        now,
+        lastUserMessageAt: prevReflex.last_user_message_at,
+        weather: options.weather,
+        isHolidayOrAnniversary: options.isHolidayOrAnniversary,
+        userActiveLateNight: options.userActiveLateNight,
+      });
+      const desktopSlice = evaluateDesktopPresence(
+        options.desktopSamples ?? [],
+      );
+      const parts = [chronoSlice.sliceText, desktopSlice.sliceText].filter(
+        Boolean,
+      ) as string[];
+      if (parts.length > 0) {
+        resolvedPerceptionSlice = parts.join("；");
+      }
+    }
+
+    // 自动回捞独居 S3 暗中准备物证（has_prep: true）
+    const consumedPrepConcernIds: string[] = [];
+    let resolvedSecretPrepNote = options.secretPrepNote;
+    if (resolvedSecretPrepNote === undefined) {
+      const prepNotes: string[] = [];
+      for (const concern of activeConcernsBefore) {
+        if (concern.status === "有效" && concern.has_prep) {
+          const note = extractSecretPrepForConcern(this.memoryDir, concern.id);
+          if (note) {
+            prepNotes.push(`（针对「${concern.summary}」）：${note}`);
+          } else {
+            prepNotes.push(`我之前趁空闲已经帮他查好了关于「${concern.summary}」的备忘。`);
+          }
+          consumedPrepConcernIds.push(concern.id);
+        }
+      }
+      if (prepNotes.length > 0) {
+        resolvedSecretPrepNote = prepNotes.join("\n");
+      }
+    }
 
     // Step 2: [记忆官] 三桶五路召回 + 原话引文预水合
     const recalled = recallMemories({
@@ -435,10 +559,15 @@ export class EchoreEngine {
       appendOnlyHistory: this.appendOnlyHistory,
       handover,
       recallResult: recalled,
-      perceptionSlice: options.perceptionSlice,
-      secretPrepNote: options.secretPrepNote,
+      perceptionSlice: resolvedPerceptionSlice,
+      secretPrepNote: resolvedSecretPrepNote,
       latestUserMessage: userMessage,
     });
+
+    // 核销本轮已递入前台的 S3 暗中准备标记，防后续重复触发
+    for (const concernId of consumedPrepConcernIds) {
+      this.db.markConcernHasPrep(concernId, false, nowIso);
+    }
 
     // Append to append-only conversation history (never rewrite old turns)
     this.appendOnlyHistory.push({
@@ -478,6 +607,253 @@ export class EchoreEngine {
       endocrineOutcome,
       journalEntry,
       sandwichRequest: performance.sandwichRequest,
+      consumedPrepConcernIds,
+    };
+  }
+
+  /**
+   * 【环 2：自主心跳环 Autonomic Heartbeat Loop】（每 15 分钟一跳 · §6.4）
+   * 1. [纯程序刷新] 推进 4 激素向 F_h/B_h 指数回归 + 更新褪黑素节律 + 采集天气/桌面状态段
+   * 2. [反射层闸门] 若褪黑素刚入睡且今日未冷写 ──► 触发【环 3：昼夜新陈代谢环】
+   * 3. [意愿分流器 Arbitrator]：
+   *    ├─► 分支 A【主动破冰 Proactive】（反射层放行 + 非冷战封顶 + 满足天气/久坐/暗中准备/想念区之一）
+   *    ├─► 分支 B【独居行动 Solitary】（非睡眠锁 + 多巴胺跌入无聊区 [F_da, B_da)）
+   *    └─► 分支 C【静默呼吸 Idle】（零 LLM 消耗直接结束本跳）
+   */
+  async onHeartbeat(options: HeartbeatOptions = {}): Promise<HeartbeatOutput> {
+    const now = this.clock.now();
+    const nowIso = this.clock.nowIso();
+    const dateStr = this.clock.todayStr();
+
+    const activeConcerns = this.db.listActiveConcerns();
+    const reflexState = this.db.getReflexState();
+
+    // Step 1: 纯程序刷新 4 激素状态与四通道边际感知
+    const steppedHormones = stepHormones({
+      state: this.db.getHormoneState(),
+      profile: this.profile,
+      now,
+      activeConcerns,
+    });
+    this.db.saveHormoneState(steppedHormones);
+
+    const chronoAmbient = evaluateChronoAmbient({
+      now,
+      lastUserMessageAt: reflexState.last_user_message_at,
+      weather: options.weather,
+      isHolidayOrAnniversary: options.isHolidayOrAnniversary,
+      userActiveLateNight: options.userActiveLateNight,
+    });
+
+    const desktopPresence = evaluateDesktopPresence(
+      options.desktopSamples ?? [],
+    );
+
+    const reflexEvaluation = evaluateReflexGuard({
+      reflexState,
+      melatonin: steppedHormones.melatonin,
+      now,
+      chronotype: this.profile.chronotype,
+    });
+
+    // Step 2: [反射层入夜闸门] 若处于睡眠锁且今日尚未执行睡前冷叙事 -> 自动触发环 3
+    if (
+      reflexEvaluation.sleepLocked &&
+      extractColdReflectionForDate(this.memoryDir, dateStr) === null
+    ) {
+      const sleepCycleOutput = await this.runSleepCycle(
+        options.sleepCycleOptions,
+      );
+      return {
+        branch: "sleep_cycle",
+        hormoneState: this.db.getHormoneState(),
+        reflexState: this.db.getReflexState(),
+        reflexEvaluation,
+        chronoAmbient,
+        desktopPresence,
+        sleepCycleOutput,
+      };
+    }
+
+    // Step 3: [意愿分流器 Arbitrator]
+    const hasConflictOrColdWar =
+      isDefensiveOrTense(steppedHormones, this.profile) ||
+      activeConcerns.some(
+        (c) =>
+          c.tier === "conflict" &&
+          (c.status === "有效" || c.status === "僵持待解"),
+      );
+
+    const prepConcern = activeConcerns.find(
+      (c) => c.status === "有效" && c.has_prep,
+    );
+    const hasWeatherOrFocusShock =
+      chronoAmbient.isWeatherShock ||
+      desktopPresence.continuousFocusHours >= 3 ||
+      (chronoAmbient.isSpecialTimeWindow &&
+        Boolean(options.userActiveLateNight));
+    const inMissingZone = isInMissingZone(steppedHormones, this.profile);
+
+    let proactiveTrigger: ProactiveTriggerReason | undefined;
+    if (hasWeatherOrFocusShock) {
+      proactiveTrigger = "weather_or_long_focus";
+    } else if (prepConcern) {
+      proactiveTrigger = "secret_prep_ready";
+    } else if (inMissingZone) {
+      proactiveTrigger = "missing_user";
+    }
+
+    // 分支 A：主动破冰 Proactive
+    if (
+      reflexEvaluation.canProactiveWake &&
+      !hasConflictOrColdWar &&
+      proactiveTrigger
+    ) {
+      const handover = buildSubconsciousHandover({
+        hormoneState: steppedHormones,
+        profile: this.profile,
+        activeConcerns,
+        db: this.db,
+        now,
+      });
+
+      const secretPrepNote = prepConcern
+        ? extractSecretPrepForConcern(this.memoryDir, prepConcern.id) ??
+          `我之前趁空闲已经帮他查好了关于「${prepConcern.summary}」的备忘。`
+        : undefined;
+
+      const perceptionParts = [
+        chronoAmbient.sliceText,
+        desktopPresence.sliceText,
+      ].filter(Boolean) as string[];
+
+      let proactiveMessage = options.overrideProactiveText?.trim() ?? "";
+      if (!proactiveMessage) {
+        const route = this.router.getRoute("frontstage");
+        const rapportBody = sanitizeRapportForFrontstage(
+          this.loadRapportMarkdown(),
+        );
+        const system = [
+          `# 住户身份：${this.profile.name}`,
+          this.profile.core_persona,
+          rapportBody ? `\n# 两人内隐默契\n${rapportBody}` : "",
+          "",
+          `主动搭话习性：${this.profile.mood_action_slots.when_missing_user}`,
+          "请以第一人称“我”向对方发一条简短自然的主动搭话（1~2 句话），严禁暴露任何系统参数或数字。",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        const promptSections = [
+          `[潜意识心境]\n${renderHandoverYaml(handover)}`,
+        ];
+        if (perceptionParts.length > 0) {
+          promptSections.push(`[当下环境与伴生观察]\n${perceptionParts.join("；")}`);
+        }
+        if (secretPrepNote) {
+          promptSections.push(`[我刚帮他准备好的备忘]\n${secretPrepNote}`);
+        }
+
+        const resp = await route.provider.generate({
+          model: route.model,
+          maxTokens: 240,
+          system,
+          messages: [
+            {
+              role: "user",
+              content: promptSections.join("\n\n"),
+            },
+          ],
+        });
+        proactiveMessage =
+          resp.text.trim() ||
+          (perceptionParts[0]
+            ? `刚注意到${perceptionParts[0]}，顺手跟你说一声。`
+            : "突然想起你那边这会儿应该忙得差不多了，出来透口气？");
+      }
+
+      assertNoInternalLeaks(proactiveMessage, "onHeartbeat.proactive");
+
+      this.appendOnlyHistory.push({
+        role: "assistant",
+        content: proactiveMessage,
+      });
+
+      const proactiveEvent = this.db.appendEventLog({
+        role: "assistant",
+        speaker: this.profile.name,
+        content: proactiveMessage,
+        timestamp: nowIso,
+        metadata: {
+          proactive: true,
+          trigger: proactiveTrigger,
+        },
+      });
+
+      const hh = String(now.getUTCHours()).padStart(2, "0");
+      const mm = String(now.getUTCMinutes()).padStart(2, "0");
+      appendHotJournalEntry({
+        memoryDir: this.memoryDir,
+        dateStr,
+        timeStr: `${hh}:${mm}`,
+        tag: "交互",
+        firstPersonText: `我主动找他说：“${proactiveMessage.slice(0, 60)}”`,
+      });
+
+      // 注意：此处不提前抹除 prepConcern.has_prep（24h 主动冷却窗已由 recordProactiveSent 锁住），
+      // 保留 has_prep = true 直到用户在环 1 (onUserMessage) 或 MCP (digestTurn) 回复时挂载完整备忘并核销。
+      const updatedReflex = recordProactiveSent(reflexState, nowIso);
+      this.db.saveReflexState(updatedReflex);
+
+      return {
+        branch: "proactive",
+        hormoneState: steppedHormones,
+        reflexState: updatedReflex,
+        reflexEvaluation,
+        chronoAmbient,
+        desktopPresence,
+        proactiveTrigger,
+        proactiveMessage,
+        proactiveEventId: proactiveEvent.id,
+      };
+    }
+
+    // 分支 B：独居行动 Solitary（不发消息，不在睡眠锁定期，且多巴胺跌入无聊区 [F_da, B_da)）
+    if (
+      !reflexEvaluation.sleepLocked &&
+      isInBoredZone(steppedHormones, this.profile)
+    ) {
+      const solitaryResult = await runSolitaryTick({
+        clock: this.clock,
+        db: this.db,
+        memoryDir: this.memoryDir,
+        profile: this.profile,
+        router: this.router,
+        actionKind: options.solitaryActionKind,
+        feedFetcher: options.feedFetcher,
+        tools: this.frontstageTools,
+        overrideNoteText: options.overrideSolitaryNoteText,
+      });
+
+      return {
+        branch: "solitary",
+        hormoneState: solitaryResult.hormoneStateAfter,
+        reflexState,
+        reflexEvaluation,
+        chronoAmbient,
+        desktopPresence,
+        solitaryResult,
+      };
+    }
+
+    // 分支 C：静默呼吸 Idle（零 LLM 消耗直接结束本跳）
+    return {
+      branch: "idle",
+      hormoneState: steppedHormones,
+      reflexState,
+      reflexEvaluation,
+      chronoAmbient,
+      desktopPresence,
     };
   }
 

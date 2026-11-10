@@ -141,7 +141,27 @@ export function appendRapportRulesToFile(params: {
   if (rules.length === 0) return [];
 
   const rapportPath = path.join(memoryDir, "implicit", "rapport.md");
-  if (!fs.existsSync(rapportPath)) return [];
+  fs.mkdirSync(path.dirname(rapportPath), { recursive: true });
+  if (!fs.existsSync(rapportPath)) {
+    const initRapport = [
+      "---",
+      "id: imp-rapport",
+      "type: 内隐默契",
+      `date: ${now.toISOString().slice(0, 10)}`,
+      "status: 有效",
+      "category: preference",
+      "allow_forget: false",
+      "---",
+      "",
+      "## 专属称呼与黑话",
+      "",
+      "## 语感与边界默契",
+      "",
+      "## 结痂雷区",
+      "",
+    ].join("\n");
+    fs.writeFileSync(rapportPath, initRapport, "utf8");
+  }
 
   let raw = fs.readFileSync(rapportPath, "utf8");
   const added: string[] = [];
@@ -413,6 +433,33 @@ export async function runNightlyCompiler(
 
   const scarRulesToAppend: RapportRuleSpec[] = [];
   const handledConcernIds = new Set<string>();
+
+  if (verdict.items.length > 0) {
+    for (const defaultPerson of ["user", "self"] as const) {
+      const personRelPath = `people/${defaultPerson}.md`;
+      const personFullPath = path.join(memoryDir, personRelPath);
+      if (!fs.existsSync(personFullPath)) {
+        const personFm: MemoryFrontmatter = {
+          id: defaultPerson,
+          type: "符号定义",
+          date: dateStr,
+          status: "有效",
+          category: "preference",
+          allow_forget: false,
+        };
+        writeCompiledMarkdownFile({
+          memoryDir,
+          relPath: personRelPath,
+          frontmatter: personFm,
+          assertions: [
+            `- 身份([[people/${defaultPerson}]]#角色, ${defaultPerson === "self" ? "住户自身" : "主互动伙伴"})`,
+          ],
+          frontstageNarrative: effectiveReflection,
+        });
+        writtenFiles.push(personRelPath);
+      }
+    }
+  }
 
   for (const item of verdict.items) {
     handledConcernIds.add(item.concern_id);

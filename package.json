@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "simulate": "bun run src/loop/simulator.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
