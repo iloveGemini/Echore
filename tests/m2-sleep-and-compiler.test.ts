@@ -41,7 +41,7 @@ function createTempMemoryRepo(): string {
 
 describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop", () => {
   test("1. Frontstage bedtime reflection summarizes hot journal in first-person and blocks leaks", async () => {
-    const clock = new VirtualClock("2026-11-10T23:30:00.000Z");
+    const clock = new VirtualClock("2026-11-10T23:30:00");
     const memDir = createTempMemoryRepo();
     const profile = resolvePersonaProfile({
       name: "阿狸",
@@ -103,7 +103,7 @@ describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop
   });
 
   test("2. Endocrine nightly liver settlement evolves T1 (7d fade), T2 (5d cold war Cap_ox), T3 (21d scar) and resolved concerns", () => {
-    const clock = new VirtualClock("2026-11-01T12:00:00.000Z");
+    const clock = new VirtualClock("2026-11-01T12:00:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const profile = resolvePersonaProfile({
       archetype: "cat_aloof", // B_ox = 0.45, F_ox = 0.25, B_cort = 0.20
@@ -136,8 +136,8 @@ describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop
       status: "有效",
       summary: "惦记他加班腰酸",
       source_event_id: logWorry.id,
-      created_at: "2026-11-01T12:00:00.000Z",
-      updated_at: "2026-11-01T12:00:00.000Z",
+      created_at: new Date("2026-11-01T12:00:00").toISOString(),
+      updated_at: new Date("2026-11-01T12:00:00").toISOString(),
       floor_cort: 0,
       cap_ox: 1.0,
       has_prep: false,
@@ -148,8 +148,8 @@ describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop
       status: "有效",
       summary: "周末临时爽约且态度敷衍",
       source_event_id: logConflict.id,
-      created_at: "2026-11-01T19:00:00.000Z",
-      updated_at: "2026-11-01T19:00:00.000Z",
+      created_at: new Date("2026-11-01T19:00:00").toISOString(),
+      updated_at: new Date("2026-11-01T19:00:00").toISOString(),
       floor_cort: 0.42,
       cap_ox: 1.0,
       has_prep: false,
@@ -160,8 +160,8 @@ describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop
       status: "已落定",
       summary: "拌嘴后已带夜宵和解",
       source_event_id: logResolved.id,
-      created_at: "2026-11-01T20:00:00.000Z",
-      updated_at: "2026-11-01T21:00:00.000Z",
+      created_at: new Date("2026-11-01T20:00:00").toISOString(),
+      updated_at: new Date("2026-11-01T21:00:00").toISOString(),
       floor_cort: 0,
       cap_ox: 1.0,
       has_prep: false,
@@ -225,20 +225,20 @@ describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop
   });
 
   test("3. Hippocampus compiler closes supersedes chains, preserves frontstage narrative, and passes L1~L6 linter", async () => {
-    const clock = new VirtualClock("2026-11-05T23:00:00.000Z");
+    const clock = new VirtualClock("2026-11-05T23:00:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const memDir = createTempMemoryRepo();
 
     db.appendEventLog({
       id: "log-20261031-2000-001",
-      timestamp: "2026-10-31T20:00:00.000Z",
+      timestamp: new Date("2026-10-31T20:00:00").toISOString(),
       role: "user",
       speaker: "user",
       content: "下楼散步不小心把脚踝扭伤了",
     });
     db.appendEventLog({
       id: "log-20261105-2140-002",
-      timestamp: "2026-11-05T21:40:00.000Z",
+      timestamp: new Date("2026-11-05T21:40:00").toISOString(),
       role: "user",
       speaker: "user",
       content: "今天走路脚踝已经完全不疼了，还跟同事阿杰约了周末打球，以后咱们就是加班搭子了",
@@ -283,7 +283,7 @@ allow_forget: false
             next_status: "已落定",
             summary: "惦记他脚踝扭伤消肿情况",
             source_event_id: "log-20261031-2000-001",
-            created_at: "2026-10-31T20:00:00.000Z",
+            created_at: new Date("2026-10-31T20:00:00").toISOString(),
             age_days: 5,
             reason: "脚踝已彻底康复",
           },
@@ -364,7 +364,7 @@ allow_forget: false
   });
 
   test("4. Fixed-step exponential decay hits 0.12 at exactly t = T_cat for zero-access memories, while reconsolidation and allow_forget protect memories", () => {
-    const clock = new VirtualClock("2026-11-01T23:50:00.000Z");
+    const clock = new VirtualClock("2026-11-01T23:50:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const memDir = createTempMemoryRepo();
 
@@ -553,7 +553,7 @@ allow_forget: false
   });
 
   test("5. Loop 3 End-to-End: EchoreEngine.runSleepCycle() orchestrates reflection, verdict, compilation, decay, L1~L6 linter and git commit", async () => {
-    const clock = new VirtualClock("2026-11-10T20:00:00.000Z");
+    const clock = new VirtualClock("2026-11-10T20:00:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const tmpMemDir = createTempMemoryRepo();
 
@@ -680,20 +680,20 @@ allow_forget: false
   });
 
   test("6. Review regressions: Night-0 strength retention, multi-slot supersedes, concern narrative preservation, path re-ID & anti-rumination on conflict events", async () => {
-    const clock = new VirtualClock("2026-11-01T23:30:00.000Z");
+    const clock = new VirtualClock("2026-11-01T23:30:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const memDir = createTempMemoryRepo();
 
     const log1 = db.appendEventLog({
       id: "log-20261101-2000-001",
-      timestamp: "2026-11-01T20:00:00.000Z",
+      timestamp: new Date("2026-11-01T20:00:00").toISOString(),
       role: "user",
       speaker: "user",
       content: "这周在赶项目，膝盖也有点旧伤不舒服",
     });
     const log2 = db.appendEventLog({
       id: "log-20261101-2100-002",
-      timestamp: "2026-11-01T21:00:00.000Z",
+      timestamp: new Date("2026-11-01T21:00:00").toISOString(),
       role: "user",
       speaker: "user",
       content: "刚才在电话里吵了两句，挂了电话心里不痛快",
@@ -705,8 +705,8 @@ allow_forget: false
       status: "有效",
       summary: "电话里拌嘴不欢而散",
       source_event_id: log2.id,
-      created_at: "2026-11-01T21:00:00.000Z",
-      updated_at: "2026-11-01T21:00:00.000Z",
+      created_at: new Date("2026-11-01T21:00:00").toISOString(),
+      updated_at: new Date("2026-11-01T21:00:00").toISOString(),
       floor_cort: 0.42,
       cap_ox: 1.0,
       has_prep: false,

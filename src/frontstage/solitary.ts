@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
-import type { Clock } from "../core/clock.ts";
+import { type Clock, formatLocalTimeHm } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
@@ -253,9 +253,7 @@ export async function runSolitaryTick(
   const now = clock.now();
   const nowIso = clock.nowIso();
   const dateStr = clock.todayStr();
-  const hh = String(now.getUTCHours()).padStart(2, "0");
-  const mm = String(now.getUTCMinutes()).padStart(2, "0");
-  const timeStr = `${hh}:${mm}`;
+  const timeStr = formatLocalTimeHm(now);
 
   const solitaryDir = path.join(memoryDir, "solitary");
   fs.mkdirSync(solitaryDir, { recursive: true });

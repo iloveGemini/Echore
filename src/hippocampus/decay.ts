@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+import {
+  formatLocalDateStr,
+  localCalendarDaysBetween,
+} from "../core/clock.ts";
 import type { EchoreDatabase, MemoryMetaRecord } from "../core/db.ts";
 import type { MemoryCategory, MemoryFrontmatter } from "../core/schemas.ts";
 import {
@@ -47,11 +51,7 @@ export interface DecayArchiveReport {
 }
 
 function daysBetweenDates(startIsoOrDate: string, now: Date): number {
-  const startStr = startIsoOrDate.slice(0, 10);
-  const nowStr = now.toISOString().slice(0, 10);
-  const startMs = new Date(`${startStr}T00:00:00Z`).getTime();
-  const nowMs = new Date(`${nowStr}T00:00:00Z`).getTime();
-  return Math.max(0, Math.floor((nowMs - startMs) / (24 * 3600 * 1000)));
+  return localCalendarDaysBetween(startIsoOrDate, now);
 }
 
 /**
@@ -120,7 +120,11 @@ export function syncMemoryMetaFromFiles(params: {
       const initialStrength = f.frontmatter.allow_forget
         ? INITIAL_MEMORY_STRENGTH
         : NAIL_MEMORY_STRENGTH;
-      const defaultLastAccessed = `${f.frontmatter.date}T00:00:00.000Z`;
+      const [y, m, d] = f.frontmatter.date.split("-").map(Number);
+      const defaultLastAccessed =
+        y && m && d
+          ? new Date(y, m - 1, d, 0, 0, 0).toISOString()
+          : f.frontmatter.date;
       db.upsertMemoryMeta({
         id: f.frontmatter.id,
         path: f.relPath,
@@ -234,7 +238,7 @@ export function runDailyMemoryDecayAndArchive(params: {
 }): DecayArchiveReport {
   const { memoryDir, db, now, elapsedDays = 1 } = params;
   const nowIso = now.toISOString();
-  const dateStr = nowIso.slice(0, 10);
+  const dateStr = formatLocalDateStr(now);
   const steps = Math.max(1, elapsedDays);
 
   const files = syncMemoryMetaFromFiles({ memoryDir, db, now });

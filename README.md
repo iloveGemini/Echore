@@ -56,7 +56,7 @@
 - **运行环境**：Bun + TypeScript 5.x
 - **存储与检索**：`bun:sqlite`（Event Log + FTS5 全文检索 + `sqlite-vec` 向量检索） + 本地 Markdown 记忆仓（Git 版本留痕）
 - **模型与协议**：自建极薄双 Adapter（Anthropic + OpenAI 兼容协议按岗位混搭） + `@modelcontextprotocol/sdk` 标准 MCP 出差门面
-- **常用命令**：`bun test` · `bun run typecheck` · `ECHORE_DATA_DIR=~/.echore/test bun run simulate 5d`
+- **常用命令**：`bun test` · `bun run test:tz` · `bun run typecheck` · `ECHORE_DATA_DIR=~/.echore/test bun run simulate 5d`
 
 ---
 

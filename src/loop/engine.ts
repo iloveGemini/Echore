@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { Clock } from "../core/clock.ts";
+import { type Clock, formatLocalTimeHm } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
@@ -587,12 +587,10 @@ export class EchoreEngine {
     });
 
     // Step 5: 追加当日 journal/YYYY-MM-DD.md 第一人称热记事
-    const hh = String(now.getUTCHours()).padStart(2, "0");
-    const mm = String(now.getUTCMinutes()).padStart(2, "0");
     const journalEntry = appendHotJournalEntry({
       memoryDir: this.memoryDir,
       dateStr: this.clock.todayStr(),
-      timeStr: `${hh}:${mm}`,
+      timeStr: formatLocalTimeHm(now),
       tag: "交互",
       firstPersonText: `今天和他就“${userMessage.slice(0, 30)}”聊了几句，我回他：“${performance.replyText.slice(0, 60)}”`,
     });
@@ -790,12 +788,10 @@ export class EchoreEngine {
         },
       });
 
-      const hh = String(now.getUTCHours()).padStart(2, "0");
-      const mm = String(now.getUTCMinutes()).padStart(2, "0");
       appendHotJournalEntry({
         memoryDir: this.memoryDir,
         dateStr,
-        timeStr: `${hh}:${mm}`,
+        timeStr: formatLocalTimeHm(now),
         tag: "交互",
         firstPersonText: `我主动找他说：“${proactiveMessage.slice(0, 60)}”`,
       });

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { formatLocalTimeHm } from "../core/clock.ts";
 import {
   assertNoInternalLeaks,
   type PulseEvaluation,
@@ -274,12 +275,10 @@ export class EchoreMcpServer {
       }
     }
 
-    const hh = String(now.getUTCHours()).padStart(2, "0");
-    const mm = String(now.getUTCMinutes()).padStart(2, "0");
     const journalEntry = appendHotJournalEntry({
       memoryDir: this.engine.memoryDir,
       dateStr: this.engine.clock.todayStr(),
-      timeStr: `${hh}:${mm}`,
+      timeStr: formatLocalTimeHm(now),
       tag: "交互",
       firstPersonText: `在外面陪他聊了“${input.userMessage.slice(0, 30)}”，我回他：“${input.assistantReply.slice(0, 60)}”`,
     });
@@ -313,13 +312,11 @@ export class EchoreMcpServer {
   }): { entryLine: string; dateStr: string } {
     const now = this.engine.clock.now();
     const dateStr = this.engine.clock.todayStr();
-    const hh = String(now.getUTCHours()).padStart(2, "0");
-    const mm = String(now.getUTCMinutes()).padStart(2, "0");
 
     const entryLine = appendHotJournalEntry({
       memoryDir: this.engine.memoryDir,
       dateStr,
-      timeStr: `${hh}:${mm}`,
+      timeStr: formatLocalTimeHm(now),
       firstPersonText: params.firstPersonText,
       tag: params.tag ?? "交互",
     });

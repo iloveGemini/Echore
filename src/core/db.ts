@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Clock } from "./clock.ts";
+import { type Clock, formatLocalDateStr } from "./clock.ts";
 import {
   type ConcernRecord,
   ConcernRecordSchema,
@@ -259,10 +259,9 @@ export class EchoreDatabase {
       .query(
         `SELECT id, timestamp, role, speaker, content, metadata_json
          FROM event_log
-         WHERE timestamp LIKE ?
          ORDER BY timestamp ASC, rowid ASC`,
       )
-      .all(`${dateStr}%`) as Array<{
+      .all() as Array<{
       id: string;
       timestamp: string;
       role: "user" | "assistant" | "solitary" | "system";
@@ -271,14 +270,16 @@ export class EchoreDatabase {
       metadata_json: string;
     }>;
 
-    return rows.map((r) => ({
-      id: r.id,
-      timestamp: r.timestamp,
-      role: r.role,
-      speaker: r.speaker,
-      content: r.content,
-      metadata: JSON.parse(r.metadata_json || "{}"),
-    }));
+    return rows
+      .filter((r) => formatLocalDateStr(r.timestamp) === dateStr)
+      .map((r) => ({
+        id: r.id,
+        timestamp: r.timestamp,
+        role: r.role,
+        speaker: r.speaker,
+        content: r.content,
+        metadata: JSON.parse(r.metadata_json || "{}"),
+      }));
   }
 
   private static readonly CJK_STOP_PARTICLES = new Set([

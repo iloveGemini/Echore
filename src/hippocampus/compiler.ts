@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+import {
+  formatLocalDateStr,
+  localCalendarDaysBetween,
+} from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
@@ -147,7 +151,7 @@ export function appendRapportRulesToFile(params: {
       "---",
       "id: imp-rapport",
       "type: 内隐默契",
-      `date: ${now.toISOString().slice(0, 10)}`,
+      `date: ${formatLocalDateStr(now)}`,
       "status: 有效",
       "category: preference",
       "allow_forget: false",
@@ -198,7 +202,7 @@ export function appendRapportRulesToFile(params: {
     const updatedFm: MemoryFrontmatter = {
       id: String(parsed.data.id ?? "imp-rapport"),
       type: "内隐默契",
-      date: now.toISOString().slice(0, 10),
+      date: formatLocalDateStr(now),
       status: "有效",
       category: "preference",
       allow_forget: false,
@@ -477,9 +481,10 @@ export async function runNightlyCompiler(
       continue;
     }
 
+    const createdDateStr = formatLocalDateStr(item.created_at);
     const relPath =
       existingConcernFile?.relPath ??
-      `concerns/${item.created_at.slice(0, 10)}-${sanitizeSlug(item.concern_id)}.md`;
+      `concerns/${createdDateStr}-${sanitizeSlug(item.concern_id)}.md`;
 
     const existingNarrative = existingConcernFile
       ? extractExistingNarrative(existingConcernFile.body)
@@ -501,7 +506,7 @@ export async function runNightlyCompiler(
       id: item.concern_id,
       type: "牵挂注",
       tier: item.next_tier,
-      date: existingConcernFile?.frontmatter.date ?? item.created_at.slice(0, 10),
+      date: existingConcernFile?.frontmatter.date ?? createdDateStr,
       status: item.next_status,
       source_event_id: item.source_event_id,
       category: existingConcernFile?.frontmatter.category ?? "life_event",
@@ -529,17 +534,12 @@ export async function runNightlyCompiler(
   }
 
   // 兜底检查磁盘上已存在但未进入 verdict 的 concerns/*.md 文件（对齐 L6 分级流转）
-  const nowDayMs = new Date(`${now.toISOString().slice(0, 10)}T00:00:00Z`).getTime();
   for (const f of currentFiles) {
     if (
       (f.relPath.startsWith("concerns/") || f.frontmatter.type === "牵挂注") &&
       !handledConcernIds.has(f.frontmatter.id)
     ) {
-      const startMs = new Date(`${f.frontmatter.date}T00:00:00Z`).getTime();
-      const ageDays = Math.max(
-        0,
-        Math.floor((nowDayMs - startMs) / (24 * 3600 * 1000)),
-      );
+      const ageDays = localCalendarDaysBetween(f.frontmatter.date, now);
       let nextTier =
         f.frontmatter.tier && f.frontmatter.tier !== "normal"
           ? f.frontmatter.tier

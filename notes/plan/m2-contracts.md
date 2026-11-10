@@ -33,6 +33,7 @@ M2 聚焦跑通 **【环 3：昼夜新陈代谢环 Circadian Sleep Loop】** 及
    - 归档门：`allow_forget: true` 且 `days_since_last_access >= T_cat` 且 `strength <= 0.12` 时，将文件 YAML 头与 `memory_meta` 的 `status` 由 `有效` 改为 `已沉底`（严禁物理删档）。
 5. **环 3 总控串联 (`src/loop/engine.ts` · `EchoreEngine.runSleepCycle()`)**：
    - 完整串联 Step 1（前台睡前冷叙事）→ Step 2（情绪官肝脏结算）→ Step 3（记忆官唯一编译 + L1–L6 自愈校验）→ Step 4（定步长衰减归档 + L1–L6 终检 + 记忆仓自动 `git commit`）。
+   - **全仓时间语义铁律**：昼夜作息节律、日记日期（`clock.todayStr()`）、牵挂年龄（`age_days`）、记忆衰减未访问天数（`days_since_last_access`）与 L6 超期审计一律统一采用**引擎本地日历日**（`formatLocalDateStr` + `localCalendarDaysBetween`），严禁混用本地时刻与 UTC 日期切片（`toISOString().slice(0, 10)`）。
 
 ---
 

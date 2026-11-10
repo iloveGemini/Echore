@@ -45,7 +45,7 @@ describe("Core: VirtualClock, SQLite & Sovereignty Leak Guard", () => {
   });
 
   test("EchoreDatabase stores EventLog, FTS5, HormoneState, ReflexState and Concerns", () => {
-    const clock = new VirtualClock("2026-11-10T20:15:00.000Z");
+    const clock = new VirtualClock("2026-11-10T20:15:00");
     expect(clock.todayStr()).toBe("2026-11-10");
     expect(clock.formatLogId(1)).toBe("log-20261110-2015-001");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });

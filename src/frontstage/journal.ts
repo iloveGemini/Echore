@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalTimeHm } from "../core/clock.ts";
 import {
   assertNoInternalLeaks,
   type SubconsciousHandover,
@@ -160,9 +161,7 @@ export async function synthesizeBedtimeReflection(params: {
     overrideReflectionText,
   } = params;
 
-  const hh = String(now.getUTCHours()).padStart(2, "0");
-  const mm = String(now.getUTCMinutes()).padStart(2, "0");
-  const timeStr = `${hh}:${mm}`;
+  const timeStr = formatLocalTimeHm(now);
 
   if (overrideReflectionText?.trim()) {
     return appendColdReflectionEntry({

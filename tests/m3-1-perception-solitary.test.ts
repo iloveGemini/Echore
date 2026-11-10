@@ -48,10 +48,10 @@ function createMockRouter(replyText: string): OrganModelRouter {
 describe("M3.1 五官感知层与独居生活引擎 (S1/S2/S3)", () => {
   test("1. 时空与天气感知：晴天常温静默，暴雨骤降/断联超48h/深夜互动边际触发", () => {
     // 平时周二下午晴天常温、1 小时前刚聊过 -> 完全静默
-    const quietNow = new Date("2026-11-10T14:00:00.000Z");
+    const quietNow = new Date("2026-11-10T14:00:00");
     const quietSlice = evaluateChronoAmbient({
       now: quietNow,
-      lastUserMessageAt: "2026-11-10T13:00:00.000Z",
+      lastUserMessageAt: new Date("2026-11-10T13:00:00").toISOString(),
       weather: {
         condition: "clear",
         temperatureC: 22,
@@ -64,7 +64,7 @@ describe("M3.1 五官感知层与独居生活引擎 (S1/S2/S3)", () => {
     // 暴雨 + 骤降 8°C + 断联 52 小时 -> 触发自然观察切片且无裸浮点数
     const stormSlice = evaluateChronoAmbient({
       now: quietNow,
-      lastUserMessageAt: "2026-11-08T09:30:00.000Z",
+      lastUserMessageAt: new Date("2026-11-08T09:30:00").toISOString(),
       weather: {
         condition: "heavy_rain",
         temperatureC: 13,
@@ -210,7 +210,7 @@ describe("M3.1 五官感知层与独居生活引擎 (S1/S2/S3)", () => {
     const memoryDir = path.join(tmpDir, "memory");
     fs.mkdirSync(memoryDir, { recursive: true });
 
-    const clock = new VirtualClock("2026-11-10T15:30:00.000Z");
+    const clock = new VirtualClock("2026-11-10T15:30:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const profile = resolvePersonaProfile({
       name: "林栖",

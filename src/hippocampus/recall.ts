@@ -1,3 +1,4 @@
+import { localCalendarDaysBetween } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
@@ -232,8 +233,7 @@ export function recallMemories(params: {
     const meta = db.getMemoryMeta(file.frontmatter.id);
     const strength = meta?.strength ?? 0.75;
 
-    const fileDateMs = new Date(`${file.frontmatter.date}T00:00:00Z`).getTime();
-    const ageHours = Math.max(0, (nowMs - fileDateMs) / (3600 * 1000));
+    const ageHours = localCalendarDaysBetween(file.frontmatter.date, now) * 24;
     const timeScore = Math.pow(2, -ageHours / 72); // 72h half-life for recency feature
 
     const sem =

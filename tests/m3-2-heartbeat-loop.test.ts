@@ -8,7 +8,7 @@ import { EchoreEngine } from "../src/loop/engine.ts";
 import { OrganModelRouter } from "../src/llm/router.ts";
 import type { LLMProvider } from "../src/llm/types.ts";
 
-function createTestEnv(initialTimeIso = "2026-11-10T06:00:00.000Z") {
+function createTestEnv(initialTimeIso = "2026-11-10T14:00:00") {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "echore-m3-2-"));
   const memoryDir = path.join(tmpDir, "memory");
   fs.mkdirSync(path.join(memoryDir, "people"), { recursive: true });

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+import { localCalendarDaysBetween } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   type MemoryFrontmatter,
@@ -86,9 +87,7 @@ export function loadStructuredMemoryFiles(
 }
 
 function daysBetween(dateStr: string, now: Date): number {
-  const start = new Date(`${dateStr}T00:00:00Z`).getTime();
-  const current = new Date(`${now.toISOString().slice(0, 10)}T00:00:00Z`).getTime();
-  return Math.floor((current - start) / (24 * 3600 * 1000));
+  return localCalendarDaysBetween(dateStr, now);
 }
 
 /**

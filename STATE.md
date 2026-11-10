@@ -34,7 +34,9 @@
 
 ## 3. 验证结果与运行备忘（2026-11-10）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **8 个测试文件、32 项测试（275 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → 在 **`TZ=UTC`、`TZ=Asia/Shanghai`、`TZ=America/New_York` 三个时区及本机默认环境下均为 8 个测试文件、32/32 项测试（275 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **仿真验证**：`ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h` 正常输出三环仿真看板
-- **已知问题**：M3 代码审阅检出的 5 项边界问题（环 2 主动破冰保留 `has_prep` 直至环 1/MCP 实际消费、`echore_digest_turn` 接入情绪官模型评估与历史追加、S3 仅针对未准备的 `minor_worry` 且 S2 支持多项目进度树推进、快进仿真台放开编译器模型调用并限制单步跨度 $\le 180\text{m}$、桌面探针补齐 `media` 状态段与外部 `log-*` 清洗）已全部修复并附回归测试；M1–M3 全部交付闭环，可随时提交。
+- **已知问题**：
+  - M3 代码审阅检出的 5 项边界问题已全部修复并附回归测试；
+  - 跨时区日期漂移问题（`computeConcernAgeDays`、L6 超期审计、`daysSinceLastAccess`、`clock.todayStr()` 等混用 UTC `toISOString().slice(0, 10)` 与本地节律时刻导致在 `TZ=Asia/Shanghai` 等时区少算 1 天）已通过全仓统一为**引擎本地日历日语义**（`formatLocalDateStr` + `localCalendarDaysBetween`）并消除测试 `.000Z` 混用彻底修复。

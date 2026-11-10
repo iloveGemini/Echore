@@ -1,4 +1,8 @@
 import YAML from "yaml";
+import {
+  formatLocalDateStr,
+  localCalendarDaysBetween,
+} from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
@@ -94,7 +98,7 @@ export function buildSubconsciousHandover(
     牵挂: c.summary.replace(/\blog-\d{4,}[-\w]*\b/gi, "").trim(),
     当时原话印象:
       quoteMap.get(c.source_event_id) ??
-      `${c.created_at.slice(0, 10)} 留下的话头，当时还没彻底聊透`,
+      `${formatLocalDateStr(c.created_at)} 留下的话头，当时还没彻底聊透`,
   }));
 
   let 当下心境基调: string;
@@ -148,11 +152,7 @@ export function renderHandoverYaml(handover: SubconsciousHandover): string {
 }
 
 function computeConcernAgeDays(createdAtIso: string, now: Date): number {
-  const startDate = createdAtIso.slice(0, 10);
-  const currentDate = now.toISOString().slice(0, 10);
-  const startMs = new Date(`${startDate}T00:00:00Z`).getTime();
-  const currentMs = new Date(`${currentDate}T00:00:00Z`).getTime();
-  return Math.max(0, Math.floor((currentMs - startMs) / (24 * 3600 * 1000)));
+  return localCalendarDaysBetween(createdAtIso, now);
 }
 
 function deriveScarSlotTag(summary: string): string {
@@ -176,7 +176,7 @@ export function settleNightlyConcerns(params: {
 }): EndocrineNightVerdict {
   const { db, profile, now } = params;
   const nowIso = now.toISOString();
-  const dateStr = nowIso.slice(0, 10);
+  const dateStr = formatLocalDateStr(now);
 
   const allConcerns = db.listAllConcerns();
   const unsettledResolvedIds = new Set(
@@ -280,7 +280,7 @@ export function settleNightlyConcerns(params: {
           reason: `T2 冲突已僵持 ${ageDays} 天未解，结转为 T3 已结痂并写入内隐雷区`,
           scar_rule: {
             slot_tag: slotTag,
-            description: `曾在 ${c.created_at.slice(0, 10)} 因「${c.summary}」长期未解留疤，再遇同类触发皮质醇敏感度翻倍`,
+            description: `曾在 ${formatLocalDateStr(c.created_at)} 因「${c.summary}」长期未解留疤，再遇同类触发皮质醇敏感度翻倍`,
             source_event_id: c.source_event_id,
           },
         });

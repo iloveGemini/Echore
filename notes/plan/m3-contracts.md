@@ -167,4 +167,5 @@
 
 - 提供 `TimeTravelSimulator` 编程接口与 CLI 入口：
   - 支持一键快进任意时长（如 `4h`、`5d`、`15d`），按 15 分钟步长推进 `VirtualClock`、自动触发 `onHeartbeat()` 与跨夜 `runSleepCycle()`；
-  - 输出时间演进快照（激素曲线、牵挂状态流转、独居物证清单、沉底归档统计与 L1–L6 体检结果）。
+  - 输出时间演进快照（激素曲线、牵挂状态流转、独居物证清单、沉底归档统计与 L1–L6 体检结果）；
+  - **跨时区一致性保证**：全仓日历日期（`todayStr`、牵挂年龄 `ageDays`、记忆衰减天数、L6 超期天数）统一按引擎本地日历日（`formatLocalDateStr` / `localCalendarDaysBetween`）计算，确保在 `TZ=UTC`、`TZ=Asia/Shanghai`、`TZ=America/New_York` 下行为 100% 一致。

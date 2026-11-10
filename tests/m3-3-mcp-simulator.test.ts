@@ -60,7 +60,7 @@ function setupTestWorkspace() {
     },
   };
 
-  const clock = new VirtualClock(new Date(2026, 10, 10, 14, 0, 0));
+  const clock = new VirtualClock("2026-11-10T14:00:00");
   const db = new EchoreDatabase({ dbPath: ":memory:", clock });
   const router = new OrganModelRouter({ defaultProvider: mockProvider });
   const engine = new EchoreEngine({
@@ -95,7 +95,7 @@ describe("M3.3 MCP 出差模式外壳与时间快进仿真台 (4h / 5d / 15d)", 
       // 预置 rapport.md（带 [src: log-xxx] 行级溯源）与一条历史事件记忆
       const logRec = ws.db.appendEventLog({
         id: "log-20261109-2000-001",
-        timestamp: "2026-11-09T20:00:00.000Z",
+        timestamp: new Date("2026-11-09T20:00:00").toISOString(),
         role: "user",
         speaker: "user",
         content: "我下周去京都看红叶，最怕人挤人的景点",
