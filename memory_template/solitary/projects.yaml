@@ -1,0 +1,14 @@
+projects:
+  - id: proj-reading-01
+    title: "重读《看不见的城市》并记下批注"
+    cursor: 0
+    nodes:
+      - id: ch1
+        title: "第一章：城市与记忆"
+        status: in_progress
+      - id: ch2
+        title: "第二章：城市与欲望"
+        status: pending
+      - id: ch3
+        title: "第三章：城市与符号"
+        status: pending

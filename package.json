@@ -1,0 +1,20 @@
+{
+  "name": "echore",
+  "version": "0.1.0",
+  "description": "Autonomous digital life & companion engine focused on simulated regulation and first-person sovereignty",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "gray-matter": "^4.0.3",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.2"
+  }
+}
