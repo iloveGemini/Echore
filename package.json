@@ -7,7 +7,8 @@
     "test": "bun test",
     "test:tz": "TZ=UTC bun test && TZ=Asia/Shanghai bun test && TZ=America/New_York bun test",
     "typecheck": "tsc --noEmit",
-    "simulate": "bun run src/loop/simulator.ts"
+    "simulate": "bun run src/loop/simulator.ts",
+    "serve": "bun run src/loop/http-server.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",

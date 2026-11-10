@@ -47,7 +47,7 @@
 | **记忆官 (`src/hippocampus/`)** | 三桶五路召回、原话引文预水合、唯一 Markdown 编译器、`rapport.md` 内隐默契、定步长衰减沉底、L1–L6 Linter | ✅ 已完成 (M1/M2) | [总纲 §3, §4, §5](notes/design/architecture-and-memory-spec.md) |
 | **前台与独居 (`src/frontstage/`)** | 实时对话演奏、无声替身 Subagent、独居三行动（S1/S2/S3）、热记事与睡前冷叙事 | ✅ 已完成 (M1/M2/M3.1) | [总纲 §1.1, §6.2, §6.3](notes/design/architecture-and-memory-spec.md) |
 | **五官感知层 (`src/perception/`)** | 时空天气边际触发、桌面伴生去噪探针（带隐私黑名单）、RSS/网页世界信息流 | ✅ 已完成 (M3.1) | [总纲 §6.1](notes/design/architecture-and-memory-spec.md) |
-| **三环总控与出差 (`src/loop/`)** | 三环主循环 `EchoreEngine`、MCP Server 出差外壳、CLI 时间快进仿真台 | ✅ 已完成 (M1/M2/M3.2/M3.3) | [总纲 §6.4, §6.5](notes/design/architecture-and-memory-spec.md) |
+| **三环总控与出差 (`src/loop/`)** | 三环主循环 `EchoreEngine`、主场 HTTP+SSE 服务层、MCP Server 出差外壳、CLI 时间快进仿真台 | ✅ 已完成 (M1/M2/M3) | [总纲 §6.4, §6.5](notes/design/architecture-and-memory-spec.md) |
 
 ---
 
@@ -56,7 +56,7 @@
 - **运行环境**：Bun + TypeScript 5.x
 - **存储与检索**：`bun:sqlite`（Event Log + FTS5 全文检索 + `sqlite-vec` 向量检索） + 本地 Markdown 记忆仓（Git 版本留痕）
 - **模型与协议**：自建极薄双 Adapter（Anthropic + OpenAI 兼容协议按岗位混搭） + `@modelcontextprotocol/sdk` 标准 MCP 出差门面
-- **常用命令**：`bun test` · `bun run test:tz` · `bun run typecheck` · `ECHORE_DATA_DIR=~/.echore/test bun run simulate 5d`
+- **常用命令**：`bun test` · `bun run test:tz` · `bun run typecheck` · `ECHORE_DATA_DIR=~/.echore/test bun run simulate 5d` · `ECHORE_DATA_DIR=~/.echore/test bun run serve`
 
 ---
 

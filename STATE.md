@@ -1,11 +1,11 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-10（完成 M3.1 感知与独居 + M3.2 环 2 自主心跳 + M3.3 MCP 出差外壳与时间快进仿真台，M1–M3 全部核心交付项已落地闭环）。
+> 最后更新：2026-11-10（完成 M3.4 主场模式极薄 HTTP + SSE 服务层 `src/loop/http-server.ts` 落地与测试，前后端双通道接口已就绪）。
 
 ## 1. 当前阶段与核心决议（2026-11-10）
 
-- **当前阶段**：**M1、M2、M3（M3.1 / M3.2 / M3.3）全部完成**（【环 1：实时交互环】+【环 2：自主心跳环】+【环 3：昼夜新陈代谢环】+ 四通道感知 + S1/S2/S3 有物证独居 + MCP Server 出差模式 + 时间快进仿真台）。
+- **当前阶段**：**M1、M2、M3（M3.1 感知独居 / M3.2 环 2 心跳 / M3.3 MCP 与快进台 / M3.4 主场 HTTP+SSE 服务层）全部完成**，下一步进入 **前端界面设计与联调**。
 - **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.3）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
 - **M1 / M2 已落地交付项（摘要）**：
   - `src/core/`、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 3 昼夜睡眠新陈代谢环）。
@@ -15,9 +15,10 @@
 - **M3.2 已落地交付项（【环 2：自主心跳环】与三环咬合）**：
   1. **环 2 自主心跳 (`src/loop/engine.ts` · `EchoreEngine.onHeartbeat()`)**：推进 4 激素指数回归与褪黑素节律；入睡自动触发 `runSleepCycle()`（同夜单次）；Arbitrator 意愿分流器驱动分支 A `proactive`（主动破冰 + 未回计数递增）、分支 B `solitary`（无聊区独居行动）、分支 C `idle`（零 LLM 消耗静默呼吸）。
   2. **环 1 联动闭环 (`EchoreEngine.onUserMessage()`)**：自动合成感知切片注入当轮动态尾部，并自动回捞、核销 `has_prep` 暗中准备物证。
-- **M3.3 已落地交付项（MCP 出差模式外壳 + 时间快进仿真台）**：
-  1. **MCP Server 出差模式外壳 (`src/loop/mcp-server.ts` · `EchoreMcpServer`)**：暴露 4 个潜意识接口（`echore_wake_context`、`echore_recall`、`echore_digest_turn`、`echore_write_journal`），支持 JSON-RPC 2.0（`initialize` / `tools/list` / `tools/call` / `ping`）与直接编程调用，全程经 `assertNoInternalLeaks` 严守零浮点数与零 `log-*` 主键泄露。
-  2. **时间快进仿真台 (`src/loop/simulator.ts` · `TimeTravelSimulator`)**：支持一键快进任意时长（`4h` / `5d` / `15d`），自动驱动环 2 与跨夜环 3，输出激素轨迹、独居物证、T2 满 5 天冷战封顶 $\text{Cap}_{\text{ox}}$、T3 满 21 天结痂入 `rapport.md` 及 `status: 已沉底` 归档全链路看板。
+- **M3.3 & M3.4 已落地交付项（双模外壳：MCP 出差 + 时间快进台 + 主场 HTTP/SSE 服务层）**：
+  1. **MCP Server 出差模式外壳 (`src/loop/mcp-server.ts` · `EchoreMcpServer`)**：暴露 4 个零泄露潜意识接口（`echore_wake_context`、`echore_recall`、`echore_digest_turn`、`echore_write_journal`）与 JSON-RPC 2.0 协议分发。
+  2. **时间快进仿真台 (`src/loop/simulator.ts` · `TimeTravelSimulator`)**：支持一键快进任意时长（`4h` / `5d` / `15d`），自动驱动环 2 与跨夜环 3。
+  3. **主场模式极薄 HTTP + SSE 服务层 (`src/loop/http-server.ts` · `createEchoreHttpApp` / `startEchoreHttpServer`)**：严格切分「陪伴主视图通道（`GET /api/companion/state`、`POST /api/chat`，强制过 `assertNoInternalLeaks`）」与「造物主观测台通道（`GET /api/observatory/state`、`POST /api/heartbeat`、`POST /api/fast-forward`、`POST /api/sleep`）」及 `GET /api/events` SSE 实时事件流。
 
 ---
 
@@ -29,14 +30,13 @@
 4. **M3.1：五官感知层 + 独居生活引擎（S1/S2/S3）（✅ 已完成，2026-11-10）**
 5. **M3.2：【环 2：自主心跳环】与三环咬合（✅ 已完成，2026-11-10）**
 6. **M3.3：MCP 出差外壳 + 时间快进仿真台（✅ 已完成，2026-11-10）**
+7. **M3.4：主场模式极薄 HTTP + SSE 服务层（✅ 已完成，2026-11-10）**
 
 ---
 
 ## 3. 验证结果与运行备忘（2026-11-10）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → 在 **`TZ=UTC`、`TZ=Asia/Shanghai`、`TZ=America/New_York` 三个时区及本机默认环境下均为 8 个测试文件、32/32 项测试（275 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → 在 **`TZ=UTC`、`TZ=Asia/Shanghai`、`TZ=America/New_York` 三个时区及本机默认环境下均为 9 个测试文件、35/35 项测试（302 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
-- **仿真验证**：`ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h` 正常输出三环仿真看板
-- **已知问题**：
-  - M3 代码审阅检出的 5 项边界问题已全部修复并附回归测试；
-  - 跨时区日期漂移问题（`computeConcernAgeDays`、L6 超期审计、`daysSinceLastAccess`、`clock.todayStr()` 等混用 UTC `toISOString().slice(0, 10)` 与本地节律时刻导致在 `TZ=Asia/Shanghai` 等时区少算 1 天）已通过全仓统一为**引擎本地日历日语义**（`formatLocalDateStr` + `localCalendarDaysBetween`）并消除测试 `.000Z` 混用彻底修复。
+- **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
+- **已知问题**：无阻塞问题；后端三环引擎与 HTTP/SSE 服务层均已就绪，可进入前端设计。

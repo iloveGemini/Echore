@@ -169,3 +169,53 @@
   - 支持一键快进任意时长（如 `4h`、`5d`、`15d`），按 15 分钟步长推进 `VirtualClock`、自动触发 `onHeartbeat()` 与跨夜 `runSleepCycle()`；
   - 输出时间演进快照（激素曲线、牵挂状态流转、独居物证清单、沉底归档统计与 L1–L6 体检结果）；
   - **跨时区一致性保证**：全仓日历日期（`todayStr`、牵挂年龄 `ageDays`、记忆衰减天数、L6 超期天数）统一按引擎本地日历日（`formatLocalDateStr` / `localCalendarDaysBetween`）计算，确保在 `TZ=UTC`、`TZ=Asia/Shanghai`、`TZ=America/New_York` 下行为 100% 一致。
+
+---
+
+## 4. 主场模式极薄 HTTP + SSE 服务层契约 (`src/loop/http-server.ts`)
+
+为支撑前端设计并严守「第一人称主权与器官隔离」红线，本地 HTTP 服务层（基于 `Bun.serve`）在 API 层切分为**「陪伴主视图（Companion Surface）」**与**「造物主观测台（Observatory Surface）」**两条隔离通道：
+
+### 4.1 陪伴主视图通道（Companion Surface · 强制过 `assertNoInternalLeaks`）
+
+1. **`GET /api/companion/state`**：
+   - 返回住户公开陪伴态（零激素浮点数、零 `log-*` 主键）：
+     ```ts
+     export interface CompanionStateResponse {
+       personaName: string;
+       chronotype: ChronotypeId;
+       currentDate: string;
+       currentTime: string;
+       handover: SubconsciousHandover;
+       messages: Array<{
+         role: "user" | "assistant";
+         speaker: string;
+         content: string;
+         timestamp: string;
+         proactive?: boolean;
+       }>;
+     }
+     ```
+2. **`POST /api/chat`**：
+   - 请求体：`{ message: string, weather?: WeatherSnapshot, desktopSamples?: DesktopWindowSample[], isHolidayOrAnniversary?: string, userActiveLateNight?: boolean }`
+   - 动作：调用 `engine.onUserMessage()` 执行【环 1：实时交互环】；
+   - 响应体：`{ reply: string, handover: SubconsciousHandover, journalEntry: string, currentDate: string, currentTime: string, consumedPrepConcernIds: string[] }`（全程经 `assertNoInternalLeaks` 校验，绝不回传 `hormoneState` 浮点数或 `userEventId/assistantEventId`）。
+
+### 4.2 造物主观测台与仿真通道（Observatory & Time-Travel Surface）
+
+1. **`GET /api/observatory/state`**：
+   - 返回给侧边观测抽屉/调试面板的完整内部快照：`{ clock: { nowIso, todayStr, localTimeHm }, profile, hormoneState, reflexState, reflexEvaluation, activeConcerns, allConcerns, memoryMeta, solitaryProjects, todayHotEntries, todayColdReflection, lintReport }`。
+2. **`POST /api/heartbeat`**：
+   - 触发单步【环 2：自主心跳环】`engine.onHeartbeat(options)`，返回 `HeartbeatOutput`。
+3. **`POST /api/fast-forward`**：
+   - 请求体：`{ duration: string | number, stepMinutes?: number }`，调用 `TimeTravelSimulator.fastForward()`，返回 `SimulationReport`。
+4. **`POST /api/sleep`**：
+   - 手动触发【环 3：昼夜新陈代谢环】`engine.runSleepCycle(options)`，返回 `SleepCycleOutput`。
+
+### 4.3 实时事件流通道（`GET /api/events` · Server-Sent Events）
+
+- 标准 `text/event-stream` 长连接，实时向前端推送三环异步动态：
+  - `connected`：连接建立握手；
+  - `chat_turn`：实时对话完成（仅含零泄露陪伴摘要）；
+  - `proactive_message`：环 2 分支 A 主动破冰消息（强制过 `assertNoInternalLeaks`，供聊天主窗口直接渲染住户主动发来的气泡）；
+  - `heartbeat` / `fast_forward` / `sleep_cycle`：通知观测台刷新内部状态与时间轴。
