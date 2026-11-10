@@ -202,24 +202,29 @@ export function runMemoryLinter(params: {
 
     // L3 recording
     if (frontmatter.supersedes) {
-      const targetId = frontmatter.supersedes;
-      const list = supersededByMap.get(targetId) ?? [];
-      list.push(frontmatter.id);
-      supersededByMap.set(targetId, list);
+      const targetIds = frontmatter.supersedes
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const targetId of targetIds) {
+        const list = supersededByMap.get(targetId) ?? [];
+        list.push(frontmatter.id);
+        supersededByMap.set(targetId, list);
 
-      const oldFile = byId.get(targetId);
-      if (!oldFile) {
-        issues.push({
-          rule: "L3",
-          file: relPath,
-          message: `L3 Error: [${frontmatter.id}] 宣告取代不存在的记录 [${targetId}]`,
-        });
-      } else if (oldFile.frontmatter.status !== "已取代") {
-        issues.push({
-          rule: "L3",
-          file: relPath,
-          message: `L3 Error: [${targetId}] 仍为“${oldFile.frontmatter.status}”，但已被 [${frontmatter.id}] 宣告取代`,
-        });
+        const oldFile = byId.get(targetId);
+        if (!oldFile) {
+          issues.push({
+            rule: "L3",
+            file: relPath,
+            message: `L3 Error: [${frontmatter.id}] 宣告取代不存在的记录 [${targetId}]`,
+          });
+        } else if (oldFile.frontmatter.status !== "已取代") {
+          issues.push({
+            rule: "L3",
+            file: relPath,
+            message: `L3 Error: [${targetId}] 仍为“${oldFile.frontmatter.status}”，但已被 [${frontmatter.id}] 宣告取代`,
+          });
+        }
       }
     }
 

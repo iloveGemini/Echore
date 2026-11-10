@@ -108,7 +108,8 @@ export class EchoreDatabase {
         updated_at TEXT NOT NULL,
         floor_cort REAL NOT NULL DEFAULT 0,
         cap_ox REAL NOT NULL DEFAULT 1,
-        has_prep INTEGER NOT NULL DEFAULT 0
+        has_prep INTEGER NOT NULL DEFAULT 0,
+        settled_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS memory_meta (
@@ -147,6 +148,13 @@ export class EchoreDatabase {
            VALUES (1, 0.15, 0.60, 0.50, 0.10, 0.15, 1.0, ?)`,
         )
         .run(this.clock.nowIso());
+    }
+
+    const concernCols = this.sqlite
+      .query("PRAGMA table_info(concerns)")
+      .all() as Array<{ name: string }>;
+    if (!concernCols.some((c) => c.name === "settled_at")) {
+      this.sqlite.exec("ALTER TABLE concerns ADD COLUMN settled_at TEXT;");
     }
   }
 
@@ -407,8 +415,8 @@ export class EchoreDatabase {
     const c = ConcernRecordSchema.parse(concern);
     this.sqlite
       .query(
-        `INSERT INTO concerns (id, tier, status, summary, source_event_id, created_at, updated_at, floor_cort, cap_ox, has_prep)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO concerns (id, tier, status, summary, source_event_id, created_at, updated_at, floor_cort, cap_ox, has_prep, settled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(id) DO UPDATE SET
            tier = excluded.tier,
            status = excluded.status,
@@ -417,7 +425,8 @@ export class EchoreDatabase {
            updated_at = excluded.updated_at,
            floor_cort = excluded.floor_cort,
            cap_ox = excluded.cap_ox,
-           has_prep = excluded.has_prep`,
+           has_prep = excluded.has_prep,
+           settled_at = CASE WHEN excluded.status = '已落定' THEN concerns.settled_at ELSE NULL END`,
       )
       .run(
         c.id,
@@ -431,6 +440,29 @@ export class EchoreDatabase {
         c.cap_ox,
         c.has_prep ? 1 : 0,
       );
+  }
+
+  listUnsettledResolvedConcerns(): ConcernRecord[] {
+    const rows = this.sqlite
+      .query(
+        `SELECT * FROM concerns
+         WHERE status = '已落定' AND settled_at IS NULL
+         ORDER BY updated_at DESC`,
+      )
+      .all() as Array<Omit<ConcernRecord, "has_prep"> & { has_prep: number }>;
+
+    return rows.map((r) =>
+      ConcernRecordSchema.parse({
+        ...r,
+        has_prep: Boolean(r.has_prep),
+      }),
+    );
+  }
+
+  markConcernNightlySettled(id: string, settledAtIso: string): void {
+    this.sqlite
+      .query(`UPDATE concerns SET settled_at = ? WHERE id = ?`)
+      .run(settledAtIso, id);
   }
 
   getConcernById(id: string): ConcernRecord | null {
@@ -477,6 +509,9 @@ export class EchoreDatabase {
   }
 
   upsertMemoryMeta(meta: MemoryMetaRecord): void {
+    this.sqlite
+      .query(`DELETE FROM memory_meta WHERE path = ? AND id != ?`)
+      .run(meta.path, meta.id);
     this.sqlite
       .query(
         `INSERT INTO memory_meta (id, path, category, status, allow_forget, strength, access_count, last_accessed, embedding_json, updated_at)

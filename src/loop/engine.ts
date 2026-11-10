@@ -400,8 +400,13 @@ export class EchoreEngine {
     );
 
     // §4.3 再巩固正反馈（正向互动 +0.05，负面冲突/未落定牵挂只增 access_count 绝不上调 strength）
+    const isCalibratedConflict =
+      rawPulse.is_conflict &&
+      !endocrineOutcome.appliedGates.gate1RapportMatchedBanter &&
+      !endocrineOutcome.appliedGates.gate2AmbiguityHold &&
+      !endocrineOutcome.appliedGates.gate3OrphanSpikeBlocked;
     const isNegativeOrConflictTurn =
-      rawPulse.is_conflict ||
+      isCalibratedConflict ||
       endocrineOutcome.hormoneState.cortisol > steppedHormones.cortisol;
     reconsolidateRecalledMemories({
       db: this.db,
@@ -489,12 +494,16 @@ export class EchoreEngine {
     const now = this.clock.now();
     const dateStr = this.clock.todayStr();
 
-    const currentHormones = stepHormones({
+    const stepped = stepHormones({
       state: this.db.getHormoneState(),
       profile: this.profile,
       now,
       activeConcerns: this.db.listActiveConcerns(),
     });
+    const currentHormones: HormoneState = {
+      ...stepped,
+      melatonin: Math.max(stepped.melatonin, 0.78),
+    };
     this.db.saveHormoneState(currentHormones);
 
     const currentHandover = buildSubconsciousHandover({

@@ -39,17 +39,19 @@ function describeCircadianFeel(
 ): string {
   const hour = now.getHours();
   const timePeriod =
-    hour < 6
-      ? "凌晨时分"
-      : hour < 11
-        ? "上午"
-        : hour < 14
-          ? "中午"
-          : hour < 18
-            ? "下午"
-            : hour < 22
-              ? "晚上"
-              : "深夜";
+    melatonin >= 0.75
+      ? "深夜入睡前"
+      : hour < 6
+        ? "凌晨时分"
+        : hour < 11
+          ? "上午"
+          : hour < 14
+            ? "中午"
+            : hour < 18
+              ? "下午"
+              : hour < 22
+                ? "晚上"
+                : "深夜";
 
   const energyFeel =
     melatonin >= 0.75
@@ -177,12 +179,19 @@ export function settleNightlyConcerns(params: {
   const dateStr = nowIso.slice(0, 10);
 
   const allConcerns = db.listAllConcerns();
+  const unsettledResolvedIds = new Set(
+    db.listUnsettledResolvedConcerns().map((c) => c.id),
+  );
   const items: ConcernSettlementItem[] = [];
 
   for (const c of allConcerns) {
     const ageDays = computeConcernAgeDays(c.created_at, now);
 
     if (c.status === "已落定") {
+      if (!unsettledResolvedIds.has(c.id)) {
+        continue;
+      }
+      db.markConcernNightlySettled(c.id, nowIso);
       items.push({
         concern_id: c.id,
         action: "settle_resolved",

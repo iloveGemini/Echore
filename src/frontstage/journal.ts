@@ -175,7 +175,7 @@ export async function synthesizeBedtimeReflection(params: {
 
   const hotEntries = extractHotEntriesForDate(memoryDir, dateStr);
   if (hotEntries.length === 0) {
-    const quietReflection = `今天安安静静地过完了，没什么特别波澜，早点歇下吧。`;
+    const quietReflection = `今日平淡无波澜，按时歇下。`;
     return appendColdReflectionEntry({
       memoryDir,
       dateStr,
@@ -217,8 +217,7 @@ export async function synthesizeBedtimeReflection(params: {
 
   const rawText = resp.text.trim();
   const fallbackText =
-    rawText ||
-    `今天经历了几件事（${hotEntries[0]?.slice(0, 40) ?? "日常相处"}），我把这些都记在心里了。`;
+    rawText || hotEntries.join("；") || "今日日常记录。";
 
   return appendColdReflectionEntry({
     memoryDir,

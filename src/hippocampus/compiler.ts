@@ -204,11 +204,14 @@ export function reconcileSynchronicLinksToInactiveFiles(params: {
   }
 
   for (const f of files) {
+    if (f.relPath === "INDEX.md" || f.relPath === "implicit/rapport.md") {
+      continue;
+    }
     const isActive =
       f.frontmatter.status === "有效" || f.frontmatter.status === "僵持待解";
     if (!isActive) continue;
 
-    let modified = false;
+    let fileModified = false;
     const updatedLines = f.body.split(/\r?\n/).map((line) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith("- ")) return line;
@@ -227,6 +230,7 @@ export function reconcileSynchronicLinksToInactiveFiles(params: {
 
       let nextArgs = argsRaw;
       let shouldConvertToDiachronic = false;
+      let lineModified = false;
 
       const refMatches = Array.from(
         argsRaw.matchAll(/\[\[([^\]#]+)(#[^\]]+)?\]\]/g),
@@ -247,22 +251,24 @@ export function reconcileSynchronicLinksToInactiveFiles(params: {
               `[[${refSym}${slotSuffix}]]`,
               `[[${replacementSym}${slotSuffix}]]`,
             );
-            modified = true;
+            lineModified = true;
+            fileModified = true;
           } else {
             shouldConvertToDiachronic = true;
-            modified = true;
+            lineModified = true;
+            fileModified = true;
           }
         }
       }
 
       const finalPred = shouldConvertToDiachronic ? "历史背景" : predicateName;
-      if (modified) {
+      if (lineModified) {
         return `- ${finalPred}(${nextArgs})${srcSuffix}`;
       }
       return line;
     });
 
-    if (modified) {
+    if (fileModified) {
       const absPath = path.join(memoryDir, f.relPath);
       writeUpdatedFrontmatter(absPath, f.frontmatter, updatedLines.join("\n"));
     }
@@ -382,7 +388,15 @@ export async function runNightlyCompiler(
     coldReflection.trim() ||
     extractColdReflectionForDate(memoryDir, dateStr) ||
     hotEntries[hotEntries.length - 1] ||
-    "今天发生的事我都记在心里了。";
+    "（当日无新增前台记事）";
+
+  const allowedFrontstageCorpus = [
+    coldReflection.trim(),
+    extractColdReflectionForDate(memoryDir, dateStr) ?? "",
+    ...hotEntries,
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const writtenFiles: string[] = [];
   const supersededIds: string[] = [];
@@ -407,6 +421,15 @@ export async function runNightlyCompiler(
     }
 
     const existingConcernFile = byId.get(item.concern_id);
+    if (
+      item.action === "keep_active" &&
+      existingConcernFile &&
+      existingConcernFile.frontmatter.status === item.next_status &&
+      existingConcernFile.frontmatter.tier === item.next_tier
+    ) {
+      continue;
+    }
+
     const relPath =
       existingConcernFile?.relPath ??
       `concerns/${item.created_at.slice(0, 10)}-${sanitizeSlug(item.concern_id)}.md`;
@@ -415,10 +438,8 @@ export async function runNightlyCompiler(
       ? extractExistingNarrative(existingConcernFile.body)
       : null;
 
-    const narrativeToUse =
-      item.action === "keep_active" && existingNarrative
-        ? existingNarrative
-        : effectiveReflection;
+    // 保留事发当日的前台第一人称原叙，避免后续跨周状态流转（淡化/冷战/结痂/落定）冲掉原叙
+    const narrativeToUse = existingNarrative || effectiveReflection;
 
     const assertions: string[] = [
       `- 牵挂([[people/user]], "${escapePredicateText(item.summary)}")`,
@@ -651,10 +672,14 @@ export async function runNightlyCompiler(
       return line;
     });
 
-    // L4 & L3 守卫：检查是否与现有活跃文件的同一主语#属性槽位冲突，自动补齐 supersedes 链
-    let effectiveSupersedes = spec.supersedes;
-    if (effectiveSupersedes && !existingById.has(effectiveSupersedes)) {
-      effectiveSupersedes = undefined;
+    // L4 & L3 守卫：检查是否与现有活跃文件的同一主语#属性槽位冲突，自动补齐 supersedes 链并防止自指
+    const targetOldIds = new Set<string>();
+    if (
+      spec.supersedes &&
+      spec.supersedes !== spec.id &&
+      existingById.has(spec.supersedes)
+    ) {
+      targetOldIds.add(spec.supersedes);
     }
 
     if (spec.status === "有效") {
@@ -677,18 +702,19 @@ export async function runNightlyCompiler(
           ) {
             const owner = activeSlotOwners.get(`${predName}::${subjectSlot}`);
             if (owner && owner.frontmatter.id !== spec.id) {
-              if (!effectiveSupersedes) {
-                effectiveSupersedes = owner.frontmatter.id;
-              }
+              targetOldIds.add(owner.frontmatter.id);
             }
           }
         }
       }
     }
 
-    // 若存在 supersedes，将被取代的旧文件 status 同步更新为 `已取代`
-    if (effectiveSupersedes) {
-      const oldFile = existingById.get(effectiveSupersedes);
+    const effectiveSupersedes =
+      targetOldIds.size > 0 ? Array.from(targetOldIds).join(", ") : undefined;
+
+    // 若存在 supersedes，将所有被取代的旧文件 status 同步更新为 `已取代`
+    for (const oldId of targetOldIds) {
+      const oldFile = existingById.get(oldId);
       if (oldFile && oldFile.frontmatter.status !== "已取代") {
         const oldAbsPath = path.join(memoryDir, oldFile.relPath);
         const updatedOldFm: MemoryFrontmatter = {
@@ -702,9 +728,15 @@ export async function runNightlyCompiler(
       }
     }
 
-    // 保留前台第一人称叙事原肉（若 spec 提供了文本则清洗校验后与前台冷叙事结合，优先保证前台原肉）
-    const narrativeToWrite =
-      spec.frontstage_narrative?.trim() || effectiveReflection;
+    // 保留前台第一人称叙事原肉（后台 compiler 模型不得脱离前台日记凭空捏造第一人称叙事）
+    const candidateSpecNarrative = spec.frontstage_narrative?.trim();
+    const isVerifiedFrontstageNarrative =
+      candidateSpecNarrative &&
+      (planOverride !== undefined ||
+        allowedFrontstageCorpus.includes(candidateSpecNarrative));
+    const narrativeToWrite = isVerifiedFrontstageNarrative
+      ? candidateSpecNarrative
+      : effectiveReflection;
 
     const compiledFm: MemoryFrontmatter = {
       id: spec.id,

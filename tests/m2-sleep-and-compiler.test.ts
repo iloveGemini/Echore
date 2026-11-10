@@ -188,12 +188,16 @@ describe("M2: Nightly Liver Settlement, Hippocampus Compiler, Decay & Sleep Loop
     expect(settledItem?.action).toBe("settle_resolved");
 
     // Fast-forward 2 more days -> Day 7 (2026-11-08): T1 minor_worry hits Day 7 -> fades to 已淡化
+    // Already-settled `con-resolved-apology` must NOT be re-emitted on subsequent nights
     clock.advanceDays(2);
     const verdictDay7 = settleNightlyConcerns({
       db,
       profile,
       now: clock.now(),
     });
+    expect(
+      verdictDay7.items.some((i) => i.concern_id === "con-resolved-apology"),
+    ).toBe(false);
     const t1ItemDay7 = verdictDay7.items.find(
       (i) => i.concern_id === "con-worry-backache",
     );
@@ -672,6 +676,224 @@ allow_forget: false
     expect(compiledEvent).toContain("悬了好几天的心总算放了下来");
 
     fs.rmSync(tmpMemDir, { recursive: true, force: true });
+    db.close();
+  });
+
+  test("6. Review regressions: Night-0 strength retention, multi-slot supersedes, concern narrative preservation, path re-ID & anti-rumination on conflict events", async () => {
+    const clock = new VirtualClock("2026-11-01T23:30:00.000Z");
+    const db = new EchoreDatabase({ dbPath: ":memory:", clock });
+    const memDir = createTempMemoryRepo();
+
+    const log1 = db.appendEventLog({
+      id: "log-20261101-2000-001",
+      timestamp: "2026-11-01T20:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "这周在赶项目，膝盖也有点旧伤不舒服",
+    });
+    const log2 = db.appendEventLog({
+      id: "log-20261101-2100-002",
+      timestamp: "2026-11-01T21:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "刚才在电话里吵了两句，挂了电话心里不痛快",
+    });
+
+    db.upsertConcern({
+      id: "con-phone-spat",
+      tier: "conflict",
+      status: "有效",
+      summary: "电话里拌嘴不欢而散",
+      source_event_id: log2.id,
+      created_at: "2026-11-01T21:00:00.000Z",
+      updated_at: "2026-11-01T21:00:00.000Z",
+      floor_cort: 0.42,
+      cap_ox: 1.0,
+      has_prep: false,
+    });
+
+    // Night 0: Compile two separate slot files + 1 ephemeral chat file + 1 conflict event file
+    const profile = resolvePersonaProfile({
+      archetype: "cat_aloof",
+      chronotype: "regular",
+    });
+    const verdict0 = settleNightlyConcerns({ db, profile, now: clock.now() });
+
+    await runNightlyCompiler({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+      dateStr: "2026-11-01",
+      verdict: verdict0,
+      coldReflection: "今晚和他因为电话拌嘴心里有点堵，但也惦记着他赶项目和膝盖旧伤。",
+      planOverride: {
+        memories: [
+          {
+            rel_path: "events/2026-11-01-work-busy.md",
+            id: "evt-work-busy",
+            type: "状态变更",
+            date: "2026-11-01",
+            status: "有效",
+            source_event_id: log1.id,
+            category: "schedule",
+            allow_forget: true,
+            assertions: ["当前状态([[people/user]]#工作节奏, 赶项目繁忙)"],
+          },
+          {
+            rel_path: "events/2026-11-01-knee-ache.md",
+            id: "evt-knee-ache",
+            type: "状态变更",
+            date: "2026-11-01",
+            status: "有效",
+            source_event_id: log1.id,
+            category: "health",
+            allow_forget: true,
+            assertions: ["当前状态([[people/user]]#膝盖, 旧伤隐痛)"],
+          },
+          {
+            rel_path: "events/2026-11-01-late-snack.md",
+            id: "evt-late-snack",
+            type: "事件记录",
+            date: "2026-11-01",
+            status: "有效",
+            source_event_id: log1.id,
+            category: "chat",
+            allow_forget: true,
+            assertions: ["日常([[people/user]], 随口提了句想吃宵夜)"],
+          },
+          {
+            rel_path: "events/2026-11-01-phone-conflict-evt.md",
+            id: "evt-phone-conflict",
+            type: "事件记录",
+            date: "2026-11-01",
+            status: "有效",
+            source_event_id: log2.id,
+            category: "life_event",
+            allow_forget: true,
+            assertions: ["冲突([[people/user]], 电话拌嘴挂断)"],
+          },
+        ],
+        rapport_rules: [],
+      },
+    });
+
+    // Run Night 0 decay right after compilation (as in runSleepCycle Step 4):
+    // Newly compiled Day-0 memories MUST stay at INITIAL_MEMORY_STRENGTH (0.75)!
+    const decayNight0 = runDailyMemoryDecayAndArchive({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+    });
+    expect(decayNight0.archivedIds).toEqual([]);
+    expect(db.getMemoryMeta("evt-late-snack")?.strength).toBe(
+      INITIAL_MEMORY_STRENGTH,
+    );
+
+    // Recalling the conflict-linked event `evt-phone-conflict` on a calm turn must NOT boost its strength (+0.05 anti-rumination guard)
+    reconsolidateRecalledMemories({
+      db,
+      memoryDir: memDir,
+      recalledItems: [
+        {
+          id: "evt-phone-conflict",
+          symbolKey: "events/2026-11-01-phone-conflict-evt",
+          relPath: "events/2026-11-01-phone-conflict-evt.md",
+          type: "事件记录",
+          category: "life_event",
+          status: "有效",
+          date: "2026-11-01",
+          summary: "电话拌嘴",
+          bucket: "bucket_a_mainline",
+          score: 0.75,
+          scoreBreakdown: { sem: 0.5, kw: 0.5, graph: 0.5, time: 1, strength: 0.75 },
+        },
+      ],
+      isNegativeOrConflictTurn: false,
+      now: clock.now(),
+    });
+    expect(db.getMemoryMeta("evt-phone-conflict")?.strength).toBe(
+      INITIAL_MEMORY_STRENGTH,
+    );
+    expect(db.getMemoryMeta("evt-phone-conflict")?.access_count).toBe(1);
+
+    // Advance 5 days to 2026-11-06:
+    // 1) T2 concern transitions to `僵持待解`, but its `## 前台原叙` from 2026-11-01 MUST be preserved!
+    // 2) A single new event updates BOTH `#工作节奏` and `#膝盖` slots at once (multi-slot conflict) and passes self-supersedes guard
+    // 3) Re-compiling an existing rel_path (`events/2026-11-01-late-snack.md`) with a new id & category updates memory_meta cleanly
+    clock.advanceDays(5);
+    const logDay5 = db.appendEventLog({
+      id: "log-20261106-2000-001",
+      timestamp: "2026-11-06T20:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "项目终于上线交差了，膝盖贴了膏药也完全不疼了",
+    });
+
+    const verdictDay5 = settleNightlyConcerns({ db, profile, now: clock.now() });
+    const compileDay5 = await runNightlyCompiler({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+      dateStr: "2026-11-06",
+      verdict: verdictDay5,
+      coldReflection: "今天各自忙完，平平淡淡。",
+      planOverride: {
+        memories: [
+          {
+            rel_path: "events/2026-11-06-both-recovered.md",
+            id: "evt-both-recovered",
+            type: "状态变更",
+            date: "2026-11-06",
+            status: "有效",
+            // Self-supersedes should be ignored, and both evt-work-busy & evt-knee-ache must be superseded
+            supersedes: "evt-both-recovered",
+            source_event_id: logDay5.id,
+            category: "health",
+            allow_forget: false,
+            assertions: [
+              "当前状态([[people/user]]#工作节奏, 项目已上线轻松)",
+              "当前状态([[people/user]]#膝盖, 贴膏药后痊愈)",
+            ],
+          },
+          {
+            rel_path: "events/2026-11-01-late-snack.md",
+            id: "evt-late-snack-renamed",
+            type: "事件记录",
+            date: "2026-11-01",
+            status: "有效",
+            source_event_id: log1.id,
+            category: "preference",
+            allow_forget: true,
+            assertions: ["偏好([[people/user]], 夜里爱吃清淡宵夜)"],
+          },
+        ],
+        rapport_rules: [],
+      },
+    });
+
+    expect(compileDay5.lintReport.passed).toBe(true);
+    expect(compileDay5.supersededIds).toContain("evt-work-busy");
+    expect(compileDay5.supersededIds).toContain("evt-knee-ache");
+    expect(db.getMemoryMeta("evt-late-snack-renamed")?.category).toBe(
+      "preference",
+    );
+
+    // Check that the concern file kept its original Day-0 narrative ("今晚和他因为电话拌嘴心里有点堵...")
+    const concernContent = fs.readFileSync(
+      path.join(memDir, "concerns", "2026-11-01-con-phone-spat.md"),
+      "utf8",
+    );
+    expect(concernContent).toContain("今晚和他因为电话拌嘴心里有点堵");
+    expect(concernContent).toContain("僵持待解");
+
+    const finalLint = runMemoryLinter({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+    });
+    expect(finalLint.passed).toBe(true);
+
+    fs.rmSync(memDir, { recursive: true, force: true });
     db.close();
   });
 });

@@ -134,6 +134,7 @@ export function syncMemoryMetaFromFiles(params: {
       });
     } else if (
       existing.status !== f.frontmatter.status ||
+      existing.category !== f.frontmatter.category ||
       existing.allow_forget !== f.frontmatter.allow_forget ||
       existing.path !== f.relPath
     ) {
@@ -167,16 +168,33 @@ export function reconsolidateRecalledMemories(params: {
     params;
   if (recalledItems.length === 0) return;
 
+  const fileById = new Map<string, ParsedMemoryFile>();
   if (memoryDir) {
-    syncMemoryMetaFromFiles({ memoryDir, db, now });
+    const syncedFiles = syncMemoryMetaFromFiles({ memoryDir, db, now });
+    for (const f of syncedFiles) {
+      fileById.set(f.frontmatter.id, f);
+    }
   }
+
+  const activeConcerns = db.listActiveConcerns();
+  const activeConcernIds = new Set(activeConcerns.map((c) => c.id));
+  const activeConcernSourceIds = new Set(
+    activeConcerns.map((c) => c.source_event_id),
+  );
 
   const nowIso = now.toISOString();
 
   for (const item of recalledItems) {
     const existing = db.getMemoryMeta(item.id);
+    const parsedFile = fileById.get(item.id);
+    const srcEventId = parsedFile?.frontmatter.source_event_id;
+    const isLinkedToActiveConcern =
+      activeConcernIds.has(item.id) ||
+      (srcEventId !== undefined && activeConcernSourceIds.has(srcEventId));
+
     const isUnresolvedConcernOrNegative =
       isNegativeOrConflictTurn ||
+      isLinkedToActiveConcern ||
       (item.type === "牵挂注" && item.status !== "已落定") ||
       item.status === "僵持待解";
 
@@ -259,6 +277,24 @@ export function runDailyMemoryDecayAndArchive(params: {
 
     const meta = db.getMemoryMeta(frontmatter.id)!;
     const prevStrength = meta.strength;
+    const daysSinceLastAccess = daysBetweenDates(meta.last_accessed, now);
+
+    // 当日新建或当日刚被访问的记忆（daysSinceLastAccess === 0 且未显式指定跨多天快进）在当晚保持当前强度，不提前扣减首日衰减
+    if (daysSinceLastAccess === 0 && params.elapsedDays === undefined) {
+      outcomes.push({
+        id: frontmatter.id,
+        relPath,
+        category: frontmatter.category,
+        previousStrength: prevStrength,
+        nextStrength: prevStrength,
+        accessCount: meta.access_count,
+        daysSinceLastAccess: 0,
+        archived: false,
+        skippedExempt: false,
+      });
+      continue;
+    }
+
     const dailyRetention = computeDailyRetention(
       frontmatter.category,
       meta.access_count,
@@ -272,7 +308,6 @@ export function runDailyMemoryDecayAndArchive(params: {
       nextStrength = Number(nextStrength.toFixed(6));
     }
 
-    const daysSinceLastAccess = daysBetweenDates(meta.last_accessed, now);
     const tCat = CATEGORY_HALF_LIFE_DAYS[frontmatter.category];
 
     const shouldArchive =
