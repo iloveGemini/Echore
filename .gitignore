@@ -1,0 +1,22 @@
+node_modules/
+.raven
+
+# 私人测试数据与本地运行库（不进仓库）
+.echore/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 考卷输出与私人对话样本（不进仓库）
+evals/*/out/
+
+# 私密/商业规划本地工作目录
+notes/private/
+
+# 系统与环境文件
+.DS_Store
+notes/.DS_Store
+.env
+.env.*
+!.env.example
