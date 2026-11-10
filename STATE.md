@@ -41,6 +41,12 @@
 
 ## 3. 验证结果与运行备忘（2026-11-10）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **4 个测试文件、15 项测试（90 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **4 个测试文件、16 项测试（105 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
+- **本轮加固（M1 Code Review 修复）**：
+  - 情绪官 `evaluatePulseWithOrgan` 补齐「最近对话上下文 + 当前活跃牵挂注」输入与完整 JSON Schema（含 `new_concern` / `reconciled_concern_ids` 及高置信冲突兜底补齐）；
+  - `runToolLoop` 多步工具调用在 Step 2+ 保持 Anthropic 三明治双缓存断点（`systemPartB` + `appendOnlyHistory` 末尾）；
+  - 修复 Gate 1/2 拦截后落入 Gate 3 误判、Gate 4 全清牵挂后残余皮质醇压回防御阈值内；
+  - 补齐三桶五路召回 `topK` 截断保底优先级与未满补位，扩充 L2/L4/L6 Linter 谓词与 `tier` 校验；
+  - 统一 `VirtualClock.todayStr()` / `formatLogId()` UTC 日期基准、增强 `assertNoInternalLeaks` 自然语言激素浮点检测、FTS5 停用词过滤与 `OR` 兜底检索、热记事单行换行折叠，并同步 [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md)。
 - **已知问题**：无阻塞问题；M2 需接入夜间编译器与定步长衰减闭环。

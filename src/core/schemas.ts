@@ -190,8 +190,9 @@ export type SubconsciousHandover = z.infer<typeof SubconsciousHandoverSchema>;
 
 const LOG_ID_LEAK_RE = /\blog-\d{4,}[-\w]*\b/i;
 const HORMONE_FLOAT_LEAK_RE =
-  /\b(?:cortisol|oxytocin|dopamine|melatonin|floor_cort|cap_ox|H_cort|H_ox|H_da|B_cort|B_ox|B_da|F_cort|F_ox|F_da)\s*[:=]\s*\d+(?:\.\d+)?/i;
-const RAW_FLOAT_DECIMAL_RE = /(?:皮质醇|催产素|多巴胺|褪黑素)\s*[:=：]?\s*0\.\d+/;
+  /\b(?:cortisol|oxytocin|dopamine|melatonin|floor_cort|cap_ox|H_cort|H_ox|H_da|B_cort|B_ox|B_da|F_cort|F_ox|F_da)\b[^\n\r]{0,12}?\d+\.\d+/i;
+const RAW_FLOAT_DECIMAL_RE =
+  /(?:皮质醇|催产素|多巴胺|褪黑素)[^\n\r]{0,10}?\d+\.\d+/;
 
 /**
  * 铁律守卫：前台上下文严禁裸露激素浮点数或 `log-*` 数据库主键

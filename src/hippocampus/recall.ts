@@ -347,7 +347,55 @@ export function recallMemories(params: {
     selectedBucket.set(c.file.symbolKey, "bucket_c_graph");
   }
 
-  // Fallback: if total selected < topK and there are remaining active candidates, fill by overall score
+  // Ensure guaranteed buckets (A + B + C) do not exceed topK by trimming excess from Bucket B first, then C, then A
+  if (selectedBucket.size > topK) {
+    const trimFromBucket = (targetBucket: RecallBucket) => {
+      const keysInBucket = Array.from(selectedBucket.entries())
+        .filter(([, b]) => b === targetBucket)
+        .map(([k]) => k)
+        .reverse();
+      for (const k of keysInBucket) {
+        if (selectedBucket.size <= topK) break;
+        selectedBucket.delete(k);
+      }
+    };
+    trimFromBucket("bucket_b_topic");
+    trimFromBucket("bucket_c_graph");
+    trimFromBucket("bucket_a_mainline");
+  }
+
+  // Fallback: if total selected < topK and there are remaining active candidates with relevant score, fill by overall score
+  if (selectedBucket.size < topK) {
+    const remainingCandidates = Array.from(scoredMap.values())
+      .filter(
+        (c) =>
+          !selectedBucket.has(c.file.symbolKey) &&
+          (c.sem > 0 || c.kw > 0 || (graphScores.get(c.file.symbolKey) ?? 0) > 0),
+      )
+      .sort((a, b) => {
+        const gA = graphScores.get(a.file.symbolKey) ?? 0;
+        const gB = graphScores.get(b.file.symbolKey) ?? 0;
+        const scoreA =
+          weights.sem * a.sem +
+          weights.kw * a.kw +
+          weights.graph * gA +
+          weights.time * a.time +
+          weights.strength * a.strength;
+        const scoreB =
+          weights.sem * b.sem +
+          weights.kw * b.kw +
+          weights.graph * gB +
+          weights.time * b.time +
+          weights.strength * b.strength;
+        return scoreB - scoreA;
+      });
+
+    for (const rem of remainingCandidates) {
+      if (selectedBucket.size >= topK) break;
+      selectedBucket.set(rem.file.symbolKey, "bucket_b_topic");
+    }
+  }
+
   const finalCandidates = Array.from(selectedBucket.keys()).map(
     (k) => scoredMap.get(k)!,
   );

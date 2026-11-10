@@ -246,32 +246,57 @@ export class EchoreDatabase {
     }));
   }
 
+  private static readonly CJK_STOP_PARTICLES = new Set([
+    "的",
+    "了",
+    "吗",
+    "呢",
+    "吧",
+    "啊",
+    "呀",
+    "哦",
+    "嘛",
+    "呗",
+  ]);
+
   searchEventLogsFts(queryText: string, limit = 10): EventLogRecord[] {
     const segmented = EchoreDatabase.toFtsSegment(queryText);
-    const cleaned = segmented
+    const rawTokens = segmented
       .replace(/[^\p{L}\p{N}\s]/gu, " ")
       .trim()
       .split(/\s+/)
       .filter(Boolean);
-    if (cleaned.length === 0) return [];
-    const ftsQuery = cleaned.map((t) => `"${t}"`).join(" AND ");
-    const rows = this.sqlite
-      .query(
-        `SELECT e.id, e.timestamp, e.role, e.speaker, e.content, e.metadata_json
-         FROM event_log_fts f
-         JOIN event_log e ON e.id = f.id
-         WHERE event_log_fts MATCH ?
-         ORDER BY bm25(event_log_fts)
-         LIMIT ?`,
-      )
-      .all(ftsQuery, limit) as Array<{
-      id: string;
-      timestamp: string;
-      role: "user" | "assistant" | "solitary" | "system";
-      speaker: string;
-      content: string;
-      metadata_json: string;
-    }>;
+    const cleaned = rawTokens.filter(
+      (t) => !EchoreDatabase.CJK_STOP_PARTICLES.has(t),
+    );
+    const tokens = cleaned.length > 0 ? cleaned : rawTokens;
+    if (tokens.length === 0) return [];
+
+    const runMatch = (operator: "AND" | "OR") => {
+      const ftsQuery = tokens.map((t) => `"${t}"`).join(` ${operator} `);
+      return this.sqlite
+        .query(
+          `SELECT e.id, e.timestamp, e.role, e.speaker, e.content, e.metadata_json
+           FROM event_log_fts f
+           JOIN event_log e ON e.id = f.id
+           WHERE event_log_fts MATCH ?
+           ORDER BY bm25(event_log_fts)
+           LIMIT ?`,
+        )
+        .all(ftsQuery, limit) as Array<{
+        id: string;
+        timestamp: string;
+        role: "user" | "assistant" | "solitary" | "system";
+        speaker: string;
+        content: string;
+        metadata_json: string;
+      }>;
+    };
+
+    let rows = runMatch("AND");
+    if (rows.length === 0 && tokens.length > 1) {
+      rows = runMatch("OR");
+    }
 
     return rows.map((r) => ({
       id: r.id,

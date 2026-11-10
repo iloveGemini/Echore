@@ -38,10 +38,16 @@ describe("Core: VirtualClock, SQLite & Sovereignty Leak Guard", () => {
     expect(() =>
       assertNoInternalLeaks("皮质醇：0.48"),
     ).toThrow(/SovereigntyViolation/);
+
+    expect(() =>
+      assertNoInternalLeaks("我感觉皮质醇已经升到了 0.72"),
+    ).toThrow(/SovereigntyViolation/);
   });
 
   test("EchoreDatabase stores EventLog, FTS5, HormoneState, ReflexState and Concerns", () => {
-    const clock = new VirtualClock("2026-11-10T12:00:00.000Z");
+    const clock = new VirtualClock("2026-11-10T20:15:00.000Z");
+    expect(clock.todayStr()).toBe("2026-11-10");
+    expect(clock.formatLogId(1)).toBe("log-20261110-2015-001");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
 
     const evt = db.appendEventLog({
@@ -58,6 +64,11 @@ describe("Core: VirtualClock, SQLite & Sovereignty Leak Guard", () => {
     const ftsHits = db.searchEventLogsFts("脚踝");
     expect(ftsHits.length).toBe(1);
     expect(ftsHits[0]?.id).toBe("log-20261110-1200-001");
+
+    // Natural sentence query with particles ("吗", "了") also matches via stop-particle filtering & OR fallback
+    const naturalHits = db.searchEventLogsFts("今天脚踝还疼吗");
+    expect(naturalHits.length).toBe(1);
+    expect(naturalHits[0]?.id).toBe("log-20261110-1200-001");
 
     db.close();
   });

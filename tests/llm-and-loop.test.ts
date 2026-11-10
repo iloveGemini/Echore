@@ -8,6 +8,7 @@ import { EchoreDatabase } from "../src/core/db.ts";
 import { AnthropicAdapter } from "../src/llm/anthropic.ts";
 import { OpenAICompatAdapter } from "../src/llm/openai-compat.ts";
 import { OrganModelRouter } from "../src/llm/router.ts";
+import { runToolLoop } from "../src/llm/tool-runner.ts";
 import {
   defineZodTool,
   type LLMGenerateParams,
@@ -91,6 +92,110 @@ describe("LLM Layer: Sandwich Prompt Caching & Dual Adapter Prefix Stability", (
     // Dynamic tail is at the very end (index 2) without mutating earlier messages
     expect(messages[2]?.content[0]?.text).toContain("<subconscious_context>");
     expect(messages[2]?.content[1]?.text).toBe("今天有点累了");
+  });
+
+  test("runToolLoop preserves Anthropic cache_control breakpoints on Step 2+ after tool execution", async () => {
+    const capturedCalls: Array<Record<string, unknown>> = [];
+    let callIdx = 0;
+
+    const mockAnthropicClient = {
+      messages: {
+        create: async (params: Record<string, unknown>) => {
+          capturedCalls.push(params);
+          callIdx += 1;
+          if (callIdx === 1) {
+            return {
+              id: "msg_step1",
+              type: "message",
+              role: "assistant",
+              model: "claude-opus-5-5",
+              stop_reason: "tool_use",
+              stop_sequence: null,
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool_1",
+                  name: "echo_tool",
+                  input: { q: "ping" },
+                },
+              ],
+              usage: { input_tokens: 500, output_tokens: 30 },
+            };
+          }
+          return {
+            id: "msg_step2",
+            type: "message",
+            role: "assistant",
+            model: "claude-opus-5-5",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            content: [{ type: "text", text: "查到了：pong" }],
+            usage: {
+              input_tokens: 550,
+              output_tokens: 15,
+              cache_read_input_tokens: 480,
+            },
+          };
+        },
+      },
+    };
+
+    const adapter = new AnthropicAdapter({
+      client: mockAnthropicClient as unknown as ConstructorParameters<
+        typeof AnthropicAdapter
+      >[0] extends { client?: infer C }
+        ? C
+        : never,
+    });
+
+    const echoTool = defineZodTool({
+      name: "echo_tool",
+      description: "Echo test tool",
+      inputSchema: z.object({ q: z.string() }),
+      execute: ({ q }) => `pong:${q}`,
+    });
+
+    const res = await runToolLoop({
+      provider: adapter,
+      tools: [echoTool],
+      initialRequest: {
+        mode: "sandwich",
+        request: {
+          model: "claude-opus-5-5",
+          staticPrefix: {
+            systemPartA: "静态人设 A",
+            systemPartB: "静态默契 B",
+          },
+          appendOnlyHistory: [
+            { role: "user", content: "旧消息" },
+            { role: "assistant", content: "旧回复" },
+          ],
+          dynamicTail: {
+            subconsciousBlock: "心境交接",
+            latestUserMessage: "帮我测一下",
+          },
+        },
+      },
+    });
+
+    expect(res.steps).toBe(2);
+    expect(capturedCalls.length).toBe(2);
+
+    // Step 2 still has 2-block system with cache_control on systemBlocks[1] and on appendOnlyHistory[1]
+    const step2System = capturedCalls[1]?.system as Array<{
+      text: string;
+      cache_control?: { type: string };
+    }>;
+    expect(Array.isArray(step2System)).toBe(true);
+    expect(step2System[1]?.cache_control).toEqual({ type: "ephemeral" });
+
+    const step2Messages = capturedCalls[1]?.messages as Array<{
+      role: string;
+      content: Array<{ text?: string; cache_control?: { type: string } }>;
+    }>;
+    expect(step2Messages[1]?.content[0]?.cache_control).toEqual({
+      type: "ephemeral",
+    });
   });
 
   test("OpenAICompatAdapter keeps static prefix 100% byte-identical across turns", async () => {
@@ -219,9 +324,11 @@ describe("Loop 1 End-to-End: EchoreEngine Reactive Loop + SilentWorker Subagent"
       },
     };
 
+    let capturedEndocrineInput = "";
     const mockEndocrineProvider: LLMProvider = {
       providerName: "mock-endocrine",
-      async generate(): Promise<LLMResponse> {
+      async generate(params: LLMGenerateParams): Promise<LLMResponse> {
+        capturedEndocrineInput = params.messages[0]?.content ?? "";
         return {
           text: JSON.stringify({
             event_summary: "用户请教人体工学椅选购建议",
@@ -277,6 +384,8 @@ describe("Loop 1 End-to-End: EchoreEngine Reactive Loop + SilentWorker Subagent"
     );
 
     expect(frontstageStep).toBe(2);
+    expect(capturedEndocrineInput).toContain("[当前活跃牵挂注]");
+    expect(capturedEndocrineInput).toContain("[最近对话上下文]");
     expect(turnOut.reply).toContain("我刚才顺手去翻了翻");
     expect(turnOut.reply).not.toContain("Subagent");
     expect(turnOut.hormoneState.oxytocin).toBeGreaterThan(0.45);

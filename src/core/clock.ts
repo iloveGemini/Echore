@@ -48,14 +48,13 @@ export class VirtualClock implements Clock {
   }
 
   todayStr(): string {
-    const d = this.now();
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    return this.nowIso().slice(0, 10);
   }
 
   formatLogId(seq?: number): string {
-    const d = this.now();
-    const ymd = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
-    const hm = `${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+    const iso = this.nowIso();
+    const ymd = iso.slice(0, 10).replace(/-/g, "");
+    const hm = `${iso.slice(11, 13)}${iso.slice(14, 16)}`;
     const s = seq !== undefined ? seq : ++this.seqCounter;
     return `log-${ymd}-${hm}-${pad3(s % 1000)}`;
   }

@@ -25,6 +25,7 @@ export function appendHotJournalEntry(input: HotJournalEntryInput): string {
 
   const cleanText = firstPersonText
     .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
+    .replace(/\s+/g, " ")
     .trim();
   assertNoInternalLeaks(cleanText, "appendHotJournalEntry");
 

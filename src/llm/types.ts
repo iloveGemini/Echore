@@ -59,6 +59,8 @@ export interface LLMGenerateParams {
   model: string;
   maxTokens?: number;
   system?: string;
+  systemBlocks?: Array<{ text: string; cacheBreakpoint?: boolean }>;
+  cacheBreakpointMessageIndex?: number;
   messages: ChatMessage[];
   tools?: ZodTool[];
 }

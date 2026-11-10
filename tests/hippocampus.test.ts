@@ -112,7 +112,25 @@ allow_forget: true
     expect(rulesHit.has("L5")).toBe(true); // log-99999999-missing not in DB
     expect(rulesHit.has("L6")).toBe(true); // T1 minor_worry >= 7 days still 有效
 
-    // Test L2: when old event is properly marked 已取代, but active concern still has synchronic 挂钩() to it
+    // Test L2: when old event is properly marked 已取代, but active concern still has synchronic 约定() to it
+    fs.writeFileSync(
+      path.join(memDir, "concerns", "2026-10-31-ankle-worry.md"),
+      `---
+id: con-2026-1031-ankle-worry
+type: 牵挂注
+tier: normal
+date: 2026-10-31
+status: 有效
+source_event_id: log-20261031-2000-001
+category: health
+allow_forget: true
+---
+## 断言
+- 约定([[events/2026-10-31-ankle-sprain]], 复查脚伤)
+`,
+      "utf8",
+    );
+
     fs.writeFileSync(
       path.join(memDir, "events", "2026-10-31-ankle-sprain.md"),
       `---
@@ -136,6 +154,11 @@ allow_forget: false
       now: clock.now(),
     });
     expect(report2.issues.some((i) => i.rule === "L2")).toBe(true);
+    expect(
+      report2.issues.some(
+        (i) => i.rule === "L6" && i.message.includes("缺失合法的 tier 分级"),
+      ),
+    ).toBe(true);
 
     fs.rmSync(memDir, { recursive: true, force: true });
     db.close();

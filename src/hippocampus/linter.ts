@@ -29,12 +29,9 @@ export interface ParsedMemoryFile {
   rawContent: string;
 }
 
-const SYNCHRONIC_PREDICATES = new Set([
+const SINGLE_VALUED_SYNCHRONIC_PREDICATES = new Set([
   "当前状态",
-  "挂钩",
   "身份",
-  "关联状态",
-  "偏好",
   "位置",
 ]);
 
@@ -152,12 +149,8 @@ export function runMemoryLinter(params: {
       const predicateName = predMatch[1]!;
       const argsRaw = predMatch[2]!;
 
-      // L2: 共时失效状态引用拦截
-      if (
-        isActiveFile &&
-        !DIACHRONIC_EXEMPT_PREDICATES.has(predicateName) &&
-        SYNCHRONIC_PREDICATES.has(predicateName)
-      ) {
+      // L2: 共时失效状态引用拦截（除历时溯源豁免谓词外，所有共时谓词均不得指向已取代/已沉底文件）
+      if (isActiveFile && !DIACHRONIC_EXEMPT_PREDICATES.has(predicateName)) {
         const refMatches = argsRaw.matchAll(/\[\[([^\]#]+)(?:#[^\]]+)?\]\]/g);
         for (const rm of refMatches) {
           const refSym = rm[1]?.trim();
@@ -178,22 +171,31 @@ export function runMemoryLinter(params: {
       }
 
       // L4: 同符号有效断言冲突
-      // Match pattern: 谓词([[subject]]#slot, value)
-      if (frontmatter.status === "有效" && SYNCHRONIC_PREDICATES.has(predicateName)) {
+      // Match pattern: 谓词([[subject]]#slot, value) 或单值共时谓词([[subject]], value)
+      if (
+        frontmatter.status === "有效" &&
+        !DIACHRONIC_EXEMPT_PREDICATES.has(predicateName)
+      ) {
         const slotArgMatch = argsRaw.match(
-          /^\s*(\[\[[^\]]+\]\]#[^,\s]+)\s*,\s*(.+)$/,
+          /^\s*(\[\[[^\]]+\]\](?:#[^,\s]+)?)\s*,\s*(.+)$/,
         );
         if (slotArgMatch) {
           const subjectSlot = slotArgMatch[1]!.trim();
-          const assertedValue = slotArgMatch[2]!.trim();
-          const slotKey = `${predicateName}::${subjectSlot}`;
-          const existing = synchronicSlotValues.get(slotKey) ?? [];
-          existing.push({
-            value: assertedValue,
-            file: relPath,
-            id: frontmatter.id,
-          });
-          synchronicSlotValues.set(slotKey, existing);
+          const hasExplicitSlot = subjectSlot.includes("#");
+          if (
+            hasExplicitSlot ||
+            SINGLE_VALUED_SYNCHRONIC_PREDICATES.has(predicateName)
+          ) {
+            const assertedValue = slotArgMatch[2]!.trim();
+            const slotKey = `${predicateName}::${subjectSlot}`;
+            const existing = synchronicSlotValues.get(slotKey) ?? [];
+            existing.push({
+              value: assertedValue,
+              file: relPath,
+              id: frontmatter.id,
+            });
+            synchronicSlotValues.set(slotKey, existing);
+          }
         }
       }
     }
@@ -264,26 +266,38 @@ export function runMemoryLinter(params: {
     // L6: 牵挂注分级流转体检
     if (relPath.startsWith("concerns/") || frontmatter.type === "牵挂注") {
       const tier = frontmatter.tier;
-      const ageDays = daysBetween(frontmatter.date, now);
-      if (tier === "minor_worry" && frontmatter.status === "有效" && ageDays >= 7) {
+      if (!tier || tier === "normal") {
         issues.push({
           rule: "L6",
           file: relPath,
-          message: `L6 Gate: T1 日常微澜 [${frontmatter.id}] 已满 ${ageDays} 天仍为“有效”，需推入冷写归档为“已淡化”`,
+          message: `L6 Gate: 牵挂注 [${frontmatter.id}] 缺失合法的 tier 分级（需为 minor_worry | conflict | scar）`,
         });
-      } else if (tier === "conflict") {
-        if (frontmatter.status === "有效" && ageDays >= 5) {
+      } else {
+        const ageDays = daysBetween(frontmatter.date, now);
+        if (
+          tier === "minor_worry" &&
+          frontmatter.status === "有效" &&
+          ageDays >= 7
+        ) {
           issues.push({
             rule: "L6",
             file: relPath,
-            message: `L6 Gate: T2 冲突牵挂 [${frontmatter.id}] 已满 ${ageDays} 天，需从急性期切换为“僵持待解(冷战封顶)”`,
+            message: `L6 Gate: T1 日常微澜 [${frontmatter.id}] 已满 ${ageDays} 天仍为“有效”，需推入冷写归档为“已淡化”`,
           });
-        } else if (frontmatter.status === "僵持待解" && ageDays >= 21) {
-          issues.push({
-            rule: "L6",
-            file: relPath,
-            message: `L6 Gate: T2 冲突牵挂 [${frontmatter.id}] 已僵持 ${ageDays} 天未解，需结转为“已结痂(T3)”并写入 rapport.md 雷区`,
-          });
+        } else if (tier === "conflict") {
+          if (frontmatter.status === "有效" && ageDays >= 5) {
+            issues.push({
+              rule: "L6",
+              file: relPath,
+              message: `L6 Gate: T2 冲突牵挂 [${frontmatter.id}] 已满 ${ageDays} 天，需从急性期切换为“僵持待解(冷战封顶)”`,
+            });
+          } else if (frontmatter.status === "僵持待解" && ageDays >= 21) {
+            issues.push({
+              rule: "L6",
+              file: relPath,
+              message: `L6 Gate: T2 冲突牵挂 [${frontmatter.id}] 已僵持 ${ageDays} 天未解，需结转为“已结痂(T3)”并写入 rapport.md 雷区`,
+            });
+          }
         }
       }
     }

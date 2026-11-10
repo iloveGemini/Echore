@@ -104,6 +104,7 @@ export function applyEndocrineCalibrationGates(
   const rapportFilter = parseRapportFilter(input.rapportContent);
   const nowIso = input.now.toISOString();
 
+  let isConflict = pulse.is_conflict;
   let cortisolDelta = pulse.cortisol_delta;
   let oxytocinDelta = pulse.oxytocin_delta;
   let dopamineDelta = pulse.dopamine_delta;
@@ -118,7 +119,8 @@ export function applyEndocrineCalibrationGates(
 
   // --- 防滚雪球铁律：Recall 零增益 & 单纯未回消息 != 冲突 ---
   if (input.isRecallOnly || input.isSilenceOnly) {
-    if (cortisolDelta > 0 || pulse.is_conflict || newConcernSpec) {
+    if (cortisolDelta > 0 || isConflict || newConcernSpec) {
+      isConflict = false;
       cortisolDelta = 0;
       newConcernSpec = undefined;
       gate3OrphanSpikeBlocked = true;
@@ -129,8 +131,9 @@ export function applyEndocrineCalibrationGates(
   const hitBanterKeyword = rapportFilter.banterKeywords.some(
     (kw) => kw && input.userMessage.includes(kw),
   );
-  if (pulse.matched_rapport_joke || (hitBanterKeyword && pulse.is_conflict)) {
+  if (pulse.matched_rapport_joke || (hitBanterKeyword && isConflict)) {
     gate1RapportMatchedBanter = true;
+    isConflict = false;
     cortisolDelta = 0;
     newConcernSpec = undefined;
     oxytocinDelta = Math.max(oxytocinDelta, 0.04);
@@ -141,17 +144,18 @@ export function applyEndocrineCalibrationGates(
     rapportFilter.scarZones.some((sz) =>
       sz.keywords.some((kw) => kw && input.userMessage.includes(kw)),
     );
-  if (hitScar && (pulse.is_conflict || cortisolDelta > 0)) {
+  if (hitScar && (isConflict || cortisolDelta > 0)) {
     gate1ScarMultiplierApplied = true;
   }
 
   // --- 第二道门：模糊语境「悬置阻尼（Ambiguity Hold）」 ---
   if (
     !gate1RapportMatchedBanter &&
-    (pulse.is_conflict || cortisolDelta > 0 || newConcernSpec?.tier === "conflict") &&
+    (isConflict || cortisolDelta > 0 || newConcernSpec?.tier === "conflict") &&
     pulse.confidence < AMBIGUITY_CONFIDENCE_THRESHOLD
   ) {
     gate2AmbiguityHold = true;
+    isConflict = false;
     cortisolDelta = 0;
     oxytocinDelta = 0;
     newConcernSpec = undefined;
@@ -159,7 +163,11 @@ export function applyEndocrineCalibrationGates(
   }
 
   // --- 第三道门：因果同源铁律（No Orphan Spike） ---
-  if (cortisolDelta > 0 || pulse.is_conflict || newConcernSpec) {
+  if (
+    !gate1RapportMatchedBanter &&
+    !gate2AmbiguityHold &&
+    (cortisolDelta > 0 || isConflict || newConcernSpec)
+  ) {
     const effectiveSourceId = pulse.source_event_id || input.sourceEventId;
     const hasValidEventInDb = db
       ? Boolean(effectiveSourceId && db.getEventLogById(effectiveSourceId))
@@ -168,9 +176,21 @@ export function applyEndocrineCalibrationGates(
       Boolean(pulse.event_summary.trim()) ||
       Boolean(newConcernSpec?.summary?.trim());
 
+    const reconciledSet = new Set(pulse.reconciled_concern_ids);
+    const hasUnreconciledActiveConcern = input.activeConcerns.some(
+      (c) =>
+        (c.status === "有效" || c.status === "僵持待解") &&
+        !reconciledSet.has(c.id),
+    );
+
     // 显著负向脉冲若给不出合法事由与原文指针，或者负向冲突未关联具体牵挂事由，直接按噪声归零
-    if (!hasValidEventInDb || !hasReason || (cortisolDelta > 0.1 && !newConcernSpec && input.activeConcerns.length === 0)) {
+    if (
+      !hasValidEventInDb ||
+      !hasReason ||
+      (cortisolDelta > 0.1 && !newConcernSpec && !hasUnreconciledActiveConcern)
+    ) {
       gate3OrphanSpikeBlocked = true;
+      isConflict = false;
       cortisolDelta = 0;
       newConcernSpec = undefined;
     }
@@ -247,8 +267,13 @@ export function applyEndocrineCalibrationGates(
       nextCortisol - input.profile.baseline.cortisol,
     );
     const reliefRatio = input.profile.fast_relief_ratio; // 0.65 ~ 0.85
-    nextCortisol =
+    const relievedCort =
       input.profile.baseline.cortisol + excessCort * (1 - reliefRatio);
+    // 若所有活跃牵挂均已和解落定，残余皮质醇压回防御阈值（B_cort + 0.14）以内，避免无牵挂仍处于防御态
+    nextCortisol =
+      stillActiveConcerns.length === 0
+        ? Math.min(relievedCort, input.profile.baseline.cortisol + 0.14)
+        : relievedCort;
     nextOxytocin = Math.max(nextOxytocin, input.profile.baseline.oxytocin);
   }
 

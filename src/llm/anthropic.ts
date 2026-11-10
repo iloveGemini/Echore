@@ -30,14 +30,14 @@ function toAnthropicTools(tools?: ZodTool[]): Anthropic.Tool[] | undefined {
 
 function toAnthropicMessages(
   history: ChatMessage[],
-  markLastWithCacheBreakpoint: boolean,
+  cacheBreakpointIndex: number | null,
 ): Anthropic.MessageParam[] {
   const result: Anthropic.MessageParam[] = [];
 
   for (let i = 0; i < history.length; i++) {
     const msg = history[i]!;
-    const isLast = i === history.length - 1;
-    const shouldCache = isLast && markLastWithCacheBreakpoint;
+    const shouldCache =
+      cacheBreakpointIndex !== null && i === cacheBreakpointIndex;
 
     if (msg.role === "user") {
       const blocks: Anthropic.ContentBlockParam[] = [];
@@ -115,13 +115,29 @@ export class AnthropicAdapter implements LLMProvider {
   }
 
   async generate(params: LLMGenerateParams): Promise<LLMResponse> {
-    const messages = toAnthropicMessages(params.messages, false);
+    const bpIndex =
+      params.cacheBreakpointMessageIndex !== undefined &&
+      params.cacheBreakpointMessageIndex >= 0
+        ? params.cacheBreakpointMessageIndex
+        : null;
+    const messages = toAnthropicMessages(params.messages, bpIndex);
     const tools = toAnthropicTools(params.tools);
+
+    const systemParam: string | Anthropic.TextBlockParam[] | undefined =
+      params.systemBlocks && params.systemBlocks.length > 0
+        ? params.systemBlocks.map((b) => ({
+            type: "text" as const,
+            text: b.text,
+            ...(b.cacheBreakpoint
+              ? { cache_control: { type: "ephemeral" as const } }
+              : {}),
+          }))
+        : params.system;
 
     const createParams: Anthropic.MessageCreateParamsNonStreaming = {
       model: params.model,
       max_tokens: params.maxTokens ?? 16000,
-      ...(params.system ? { system: params.system } : {}),
+      ...(systemParam ? { system: systemParam } : {}),
       ...(tools ? { tools } : {}),
       ...(this.enableAdaptiveThinking
         ? { thinking: { type: "adaptive" } }
@@ -163,7 +179,9 @@ export class AnthropicAdapter implements LLMProvider {
 
     const historyMessages = toAnthropicMessages(
       request.appendOnlyHistory,
-      request.appendOnlyHistory.length > 0, // ◄ Claude 缓存断点 2
+      request.appendOnlyHistory.length > 0
+        ? request.appendOnlyHistory.length - 1
+        : null, // ◄ Claude 缓存断点 2
     );
 
     const tailBlocks: Anthropic.TextBlockParam[] = [];

@@ -170,6 +170,7 @@ allow_forget: false
       db,
     );
     expect(out1.appliedGates.gate1RapportMatchedBanter).toBe(true);
+    expect(out1.appliedGates.gate3OrphanSpikeBlocked).toBe(false);
     expect(out1.hormoneState.cortisol).toBe(baseHormones.cortisol);
 
     // 2. Gate 2: Ambiguity hold when confidence < 0.75
@@ -209,6 +210,7 @@ allow_forget: false
       db,
     );
     expect(out2.appliedGates.gate2AmbiguityHold).toBe(true);
+    expect(out2.appliedGates.gate3OrphanSpikeBlocked).toBe(false);
     expect(out2.hormoneState.cortisol).toBe(baseHormones.cortisol);
     expect(out2.activeConcerns.length).toBe(0);
     expect(out2.ambiguityProbeHint).toContain("摸不准");
@@ -301,7 +303,9 @@ allow_forget: false
     );
     expect(out4.appliedGates.gate4IntradayFastRelief).toBe(true);
     expect(out4.activeConcerns.length).toBe(0);
-    expect(out4.hormoneState.cortisol).toBeLessThan(0.40); // 65% of excess cortisol cleared immediately!
+    expect(out4.hormoneState.cortisol).toBeLessThanOrEqual(
+      profile.baseline.cortisol + 0.14,
+    ); // Residual cortisol settled below defensive threshold (+0.15) when all concerns resolved
 
     db.close();
   });

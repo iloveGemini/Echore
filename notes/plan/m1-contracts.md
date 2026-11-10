@@ -74,7 +74,7 @@ export interface Clock {
   - `upsertMemoryMeta(meta: MemoryMetaRecord): void` / `getMemoryMeta(id: string): MemoryMetaRecord | null`
 
 ### 2.4 `src/reflex/guard.ts`
-- `evaluateReflexGuard(state, melatonin, now, chronotype)`：
+- `evaluateReflexGuard({ reflexState, melatonin, now, chronotype })`：
   - `sleepLocked`: `melatonin >= 0.75` 或处于作息睡眠锁窗口；
   - `proactiveCooldownLocked`: 距 `last_proactive_at` 不足 24h；
   - `proactiveUnansweredLocked`: `proactive_lock === true` 或 `consecutive_unanswered_proactive >= 2`；
@@ -82,19 +82,19 @@ export interface Clock {
 
 ### 2.5 `src/endocrine/`
 - `resolvePersonaProfile(config: PersonaConfig): ResolvedEndocrineProfile`
-- `stepHormones(state, profile, deltaHours, now, activeConcerns): HormoneState`
-- `evaluateTurnPulse(input, evaluatorLLM?): Promise<EndocrineTurnOutcome>`：执行四道门调准并就地更新激素与牵挂状态。
-- `buildSubconsciousHandover(params): SubconsciousHandover`
+- `stepHormones({ state, profile, now, activeConcerns?, overrideDeltaHours? }): HormoneState`
+- `applyEndocrineCalibrationGates(input: EndocrineEvaluationInput, db?: EchoreDatabase): EndocrineTurnOutcome`：执行四道门调准并就地更新激素与牵挂状态。
+- `buildSubconsciousHandover(params: BuildHandoverParams): SubconsciousHandover`
 
 ### 2.6 `src/hippocampus/`
-- `runMemoryLinter(memoryDir: string, db: EchoreDatabase, now: Date): LintReport`（覆盖 L1–L6）
-- `preHydrateQuotes(db: EchoreDatabase, sourceEventIds: string[]): Map<string, string>`
-- `recallMemories(options): Promise<RecallResult>`（桶 A/B/C 保底 + 五路混排 + Top 3 预水合）
+- `runMemoryLinter({ memoryDir, db, now }): LintReport`（覆盖 L1–L6）
+- `preHydrateQuotes(db: EchoreDatabase, sourceEventIds: Array<string | undefined | null>): Map<string, string>`
+- `recallMemories(params): RecallResult`（桶 A/B/C 保底 + 未满 `topK` 补位 + 五路混排 + Top 3 预水合）
 
 ### 2.7 `src/llm/` 与 `src/frontstage/`、`src/loop/engine.ts`
-- `SandwichContext`:
+- `SandwichRequest`:
   - `staticPrefix`: `{ tools, systemPartA, systemPartB }`（24h 稳定，打缓存断点 1）
-  - `appendOnlyHistory`: `ChatMessage[]`（打缓存断点 2）
-  - `dynamicTail`: `{ handoverYaml, recalledMemoriesBlock, perceptionBlock, latestUserMessage }`（垫在最末尾）
-- `SilentWorker.runTask(task, context)`：返回强制以第一人称 `"我刚才顺手去查了查/翻了翻，记下这些要点：..."` 包装的笔记，严禁暴露“Subagent/助手汇报”字样。
-- `EchoreEngine.onUserMessage(userMessage: string)`：执行【环 1】五步闭环并返回 `{ reply, handover, recalled, hormoneState, journalEntry, eventId }`。
+  - `appendOnlyHistory`: `ChatMessage[]`（打缓存断点 2，多步工具循环内全程保持同一 `SandwichRequest` 缓存断点）
+  - `dynamicTail`: `{ subconsciousBlock, latestUserMessage }`（垫在最末尾）
+- `runSilentWorker(params: SilentWorkerTaskParams)` / `createSilentWorkerTool(router, workerTools)`：返回强制以第一人称 `"我刚才顺手去翻了翻，记下这些要点：..."` 包装的笔记，严禁暴露“Subagent/助手汇报”字样。
+- `EchoreEngine.onUserMessage(userMessage: string, options?: ReactiveTurnOptions)`：执行【环 1】五步闭环并返回 `{ userEventId, assistantEventId, reply, handover, recalled, hormoneState, endocrineOutcome, journalEntry, sandwichRequest }`。

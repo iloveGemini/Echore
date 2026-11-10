@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Clock } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
+  type ConcernRecord,
   type HormoneState,
   type PersonaConfig,
   type PulseEvaluation,
@@ -115,11 +116,21 @@ export class EchoreEngine {
     return fs.readFileSync(rapportPath, "utf8");
   }
 
-  private async evaluatePulseWithOrgan(
-    userMessage: string,
-    rapportMarkdown: string,
-    override?: Partial<PulseEvaluation>,
-  ): Promise<PulseEvaluation> {
+  private async evaluatePulseWithOrgan(params: {
+    userMessage: string;
+    rapportMarkdown: string;
+    recentHistory: readonly ChatMessage[];
+    activeConcerns: readonly ConcernRecord[];
+    override?: Partial<PulseEvaluation>;
+  }): Promise<PulseEvaluation> {
+    const {
+      userMessage,
+      rapportMarkdown,
+      recentHistory,
+      activeConcerns,
+      override,
+    } = params;
+
     if (override) {
       return PulseEvaluationSchema.parse({
         event_summary: override.event_summary ?? userMessage.slice(0, 60),
@@ -131,9 +142,37 @@ export class EchoreEngine {
     const route = this.router.getRoute("endocrine");
     const system = [
       "你是 Echore 的后台情绪官（内分泌脉冲评估器）。",
-      "请结合常驻默契滤网（rapport.md）评估用户最新话语的情绪脉冲，只输出合法的 JSON 对象。",
-      "字段包括：event_summary (string), confidence (0~1), is_conflict (boolean), is_reconciliation (boolean), is_warm (boolean), is_novel (boolean), matched_rapport_joke (boolean), cortisol_delta (-1~1), oxytocin_delta (-1~1), dopamine_delta (-1~1)。",
+      "请结合「常驻默契滤网（rapport.md）」、「最近对话上下文」与「当前活跃牵挂注」评估用户最新话语的情绪脉冲，只输出合法的 JSON 对象。",
+      "JSON 字段规范：",
+      "- event_summary (string): 本轮互动简述",
+      "- confidence (number, 0~1): 语义判断置信度（似嗔似笑或语境模糊时给 < 0.75）",
+      "- is_conflict (boolean): 是否构成真实冒犯/冲突",
+      "- is_reconciliation (boolean): 用户是否在真诚道歉、解释清楚或哄好已有牵挂",
+      "- is_warm (boolean), is_novel (boolean), matched_rapport_joke (boolean)",
+      "- triggered_scar_zone (string, optional): 若触碰结痂雷区则填写雷区标签",
+      "- cortisol_delta (-1~1), oxytocin_delta (-1~1), dopamine_delta (-1~1)",
+      "- new_concern (optional): { id?: string, tier: 'minor_worry' | 'conflict' | 'scar', summary: string, floor_cort?: number }（当产生新的日常惦记或实质冲突时必填）",
+      "- reconciled_concern_ids (string[]): 被本轮和解消除的活跃牵挂 ID 列表",
+      "- ambiguity_probe_hint (string, optional): 置信度 < 0.75 时递给前台的试探基调提示",
     ].join("\n");
+
+    const recentTurnsText =
+      recentHistory.length > 0
+        ? recentHistory
+            .slice(-6)
+            .map((m) => `${m.role === "user" ? "用户" : "我"}: ${m.content}`)
+            .join("\n")
+        : "（暂无前序对话）";
+
+    const activeConcernsText =
+      activeConcerns.length > 0
+        ? activeConcerns
+            .map(
+              (c) =>
+                `- id: ${c.id} | tier: ${c.tier} | status: ${c.status} | summary: ${c.summary}`,
+            )
+            .join("\n")
+        : "（当前无活跃牵挂）";
 
     const resp = await route.provider.generate({
       model: route.model,
@@ -142,7 +181,12 @@ export class EchoreEngine {
       messages: [
         {
           role: "user",
-          content: `[默契滤网]\n${rapportMarkdown}\n\n[用户最新话语]\n${userMessage}`,
+          content: [
+            `[默契滤网]\n${rapportMarkdown || "（无）"}`,
+            `[当前活跃牵挂注]\n${activeConcernsText}`,
+            `[最近对话上下文]\n${recentTurnsText}`,
+            `[用户最新话语]\n${userMessage}`,
+          ].join("\n\n"),
         },
       ],
     });
@@ -150,8 +194,22 @@ export class EchoreEngine {
     try {
       const jsonMatch = resp.text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return PulseEvaluationSchema.parse(parsed);
+        const parsed = PulseEvaluationSchema.parse(JSON.parse(jsonMatch[0]));
+        // 若情绪官 LLM 判定为高置信度冲突但漏填 new_concern，自动基于 event_summary 补齐牵挂规格以防被孤儿门误杀
+        if (
+          parsed.is_conflict &&
+          parsed.confidence >= 0.75 &&
+          parsed.cortisol_delta > 0.1 &&
+          !parsed.new_concern &&
+          activeConcerns.length === 0 &&
+          parsed.event_summary.trim()
+        ) {
+          parsed.new_concern = {
+            tier: "conflict",
+            summary: parsed.event_summary.trim(),
+          };
+        }
+        return parsed;
       }
     } catch {
       // Fallback to neutral calm pulse if endocrine LLM output is non-JSON
@@ -215,11 +273,13 @@ export class EchoreEngine {
       activeConcerns: activeConcernsBefore,
     });
 
-    const rawPulse = await this.evaluatePulseWithOrgan(
+    const rawPulse = await this.evaluatePulseWithOrgan({
       userMessage,
       rapportMarkdown,
-      options.pulseOverride,
-    );
+      recentHistory: this.appendOnlyHistory,
+      activeConcerns: activeConcernsBefore,
+      override: options.pulseOverride,
+    });
 
     const endocrineOutcome = applyEndocrineCalibrationGates(
       {

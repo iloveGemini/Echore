@@ -59,12 +59,24 @@ export async function runToolLoop(params: {
           appendOnlyHistory: workingHistory,
         });
       } else {
-        // After step 1, the initial dynamicTail user message has entered workingHistory
+        // After step 1, preserve both System Part A/B cache breakpoint 1 and appendOnlyHistory end breakpoint 2
         const stableSystem = `${initialRequest.request.staticPrefix.systemPartA}\n\n${initialRequest.request.staticPrefix.systemPartB}`;
+        const initialHistoryLen =
+          initialRequest.request.appendOnlyHistory.length;
         currentResponse = await provider.generate({
           model: initialRequest.request.model,
           maxTokens: initialRequest.request.maxTokens,
           system: stableSystem,
+          systemBlocks: [
+            { text: initialRequest.request.staticPrefix.systemPartA },
+            {
+              text: initialRequest.request.staticPrefix.systemPartB,
+              cacheBreakpoint: true,
+            },
+          ],
+          ...(initialHistoryLen > 0
+            ? { cacheBreakpointMessageIndex: initialHistoryLen - 1 }
+            : {}),
           messages: workingHistory,
           tools,
         });
