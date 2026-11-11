@@ -1,0 +1,63 @@
+{
+  "name": "星尘云团 (Cloud Puff)",
+  "species": "Cloud Puff",
+  "category": "mascot",
+  "version": "1.0.0",
+  "base_model": "pure_velvet_minimalist",
+  "aspect_ratio": "1:1",
+  "canvas_size": {
+    "width": 1024,
+    "height": 1024
+  },
+  "states": {
+    "normal": {
+      "expression": "normal",
+      "label": "常态",
+      "file": "normal.png",
+      "description": "纯净天鹅绒常态，饱满轻柔云团，内蕴温润微核暖光，两颗平静深灰豆豆眼。",
+      "trigger_context": "默认待机、标准日常状态、平静陪伴"
+    },
+    "happy": {
+      "expression": "happy",
+      "label": "开心",
+      "file": "happy.png",
+      "description": "云体轻微轻弹膨胀、饱满圆润；腹心透出蜜桃粉金色融融暖光；周身散落细密轻盈跳跃的微光碎屑/星尘点；豆豆眼微弯成幸福弯月状（^^）。",
+      "trigger_context": "雀跃、亲近、话密、目标达成、暖心共鸣"
+    },
+    "aggrieved": {
+      "expression": "aggrieved",
+      "label": "委屈",
+      "file": "aggrieved.png",
+      "description": "像吸了水汽的小面团略微扁塌下沉；核心光晕收暗透出清冷冰青色；两颗豆豆眼微微向下耷拉，无眼泪但透着惹人怜惜的难过。",
+      "trigger_context": "急性芥蒂、带刺、示弱、被误解或失落时刻"
+    },
+    "alienated": {
+      "expression": "alienated",
+      "label": "疏离",
+      "file": "alienated.png",
+      "description": "云团边缘收束凝实成冷白瓷感，周身星屑隐去熄灭；核心呈克制的冷白微光；两颗豆豆眼恢复水平点状，神情安静疏离、有距离感。",
+      "trigger_context": "冷战僵持、情绪距离感、克制客气、防御机制启动"
+    },
+    "sleepy": {
+      "expression": "sleepy",
+      "label": "困倦",
+      "file": "sleepy.png",
+      "description": "整团趴平伏成软绵绵的小枕头状；核心转为极暗淡的琥珀微光；两颗豆豆眼闭合为两条柔和细横线（--），透着安心沉睡的呼吸起伏感。",
+      "trigger_context": "入夜犯困、褪黑素爬升、晚安与深度休息模式"
+    },
+    "yearning": {
+      "expression": "yearning",
+      "label": "想念",
+      "file": "yearning.png",
+      "description": "云体微微前倾拉长、显得轻柔依恋；内部浮现一抹如极光般缓慢流转的紫粉色微晕；眼神专注而温柔。",
+      "trigger_context": "久未联系、催产素滑入想念区、主动破冰与挂念"
+    },
+    "solitary": {
+      "expression": "solitary",
+      "label": "独居",
+      "file": "solitary.png",
+      "description": "侧身蜷缩姿势，安安静静缩在自己的小光晕里，伴随一本极简微型发光小书发呆，与外界保持舒适的独处感。",
+      "trigger_context": "心跳独居回合中、日常独处流、伴生专属自我充电空间"
+    }
+  }
+}

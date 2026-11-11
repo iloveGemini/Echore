@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="claude-day" data-mode="day">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Echore · 对话间交互原型 (Claude 居中单栏流 · 全画布像素猫咪伴侣)</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-viewport">
+    <header class="theme-control-bar" aria-label="视觉风格与日夜模式切换控制栏">
+      <div class="brand-meta">
+        <span class="brand-mark">
+          <span class="brand-core-dot"></span>
+          <span>ECHORE · CONVERSATION</span>
+        </span>
+        <span class="theme-spec-caption" id="theme-spec-caption">
+          羊皮纸暖白 #FAF9F5 / #F3F1EC · 白卡容器 #FFFFFF · 炭墨 #1F1E1D · 赤陶金 #D97757
+        </span>
+      </div>
+
+      <div class="control-right-cluster">
+        <div class="claude-primary-switcher" role="tablist" aria-label="Claude 日夜主推风格">
+          <button
+            type="button"
+            role="tab"
+            aria-selected="true"
+            class="claude-mode-btn is-active"
+            data-theme-target="claude-day"
+          >
+            <span class="swatch-claude-day"></span>
+            <span>日间模式 (Claude Daylight)</span>
+            <span class="theme-key-hint">[1]</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            class="claude-mode-btn"
+            data-theme-target="claude-night"
+          >
+            <span class="swatch-claude-night"></span>
+            <span>夜间模式 (Claude Midnight)</span>
+            <span class="theme-key-hint">[2]</span>
+          </button>
+        </div>
+
+        <button
+          type="button"
+          class="day-night-quick-toggle"
+          id="day-night-toggle-btn"
+          title="切换当前风格的日间/夜间双色 [快捷键 D]"
+        >
+          <span id="day-night-toggle-label">切换夜间 · Night</span>
+          <span class="theme-key-hint">[D]</span>
+        </button>
+
+        <div class="theme-switcher-tabs" role="tablist" aria-label="对比设计风格">
+          <button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            class="theme-tab-btn"
+            data-theme-target="stardust"
+          >
+            <span class="theme-swatch swatch-stardust"></span>
+            <span>月光星尘</span>
+            <span class="theme-key-hint">[3]</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            class="theme-tab-btn"
+            data-theme-target="deep-void"
+          >
+            <span class="theme-swatch swatch-deep-void"></span>
+            <span>深空浮光</span>
+            <span class="theme-key-hint">[4]</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            class="theme-tab-btn"
+            data-theme-target="ink-paper"
+          >
+            <span class="theme-swatch swatch-ink-paper"></span>
+            <span>纸墨诗性</span>
+            <span class="theme-key-hint">[5]</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="claude-workspace">
+      <main class="claude-central-column">
+        <header class="viewport-header">
+          <div class="header-title-group">
+            <h1 class="room-heading">对话间</h1>
+            <span class="room-subtitle">林栖的起居室 · 认识的第 43 天</span>
+          </div>
+          <div class="header-ambient-note">
+            <span id="header-ambient-text">Claude Daylight · 羊皮纸与赤陶微光</span>
+            <span>·</span>
+            <span>21:42</span>
+          </div>
+        </header>
+
+        <nav class="rooms-top-nav" aria-label="四间房收敛导航">
+          <button type="button" class="room-nav-item is-active" data-room="living">
+            <span class="room-index">I</span>
+            <span>对话间</span>
+            <span class="room-status-note">· 驻留</span>
+          </button>
+          <button type="button" class="room-nav-item" data-room="daily">
+            <span class="room-index">II</span>
+            <span>日常流</span>
+            <span class="room-status-note">· 独居物证</span>
+          </button>
+          <button type="button" class="room-nav-item" data-room="library">
+            <span class="room-index">III</span>
+            <span>记忆图书馆</span>
+            <span class="room-status-note">· 18篇手记</span>
+          </button>
+          <button type="button" class="room-nav-item" data-room="threshold">
+            <span class="room-index">IV</span>
+            <span>门口</span>
+            <span class="room-status-note">· 信箱与契约</span>
+          </button>
+        </nav>
+
+        <div class="room-preview-banner" id="room-preview-banner" hidden>
+          <span id="room-preview-text"></span>
+          <button type="button" class="banner-return-btn" id="room-return-btn">回到对话间</button>
+        </div>
+
+        <div class="dialogue-stream" id="dialogue-stream" role="log" aria-live="polite">
+          <div class="dialogue-date-divider">11月10日 · 认识的第 43 天 · 晚间</div>
+
+          <div class="msg-row is-resident">
+            <div class="msg-avatar">
+              <img
+                class="resident-avatar-img"
+                src="./assets/default_pack/normal.png"
+                alt="星尘云团"
+              />
+            </div>
+            <div class="msg-content-wrap">
+              <div class="msg-meta">
+                <span class="msg-speaker">傲娇猫咪 · 林栖</span>
+                <span class="msg-time">21:38</span>
+              </div>
+              <div class="msg-bubble">
+                刚把窗台那盆迷迭香往里挪了挪，外面起风了。你今天回来得比平时晚一点，路上冷吗？
+              </div>
+            </div>
+          </div>
+
+          <div class="msg-row is-user">
+            <div class="msg-content-wrap">
+              <div class="msg-meta">
+                <span class="msg-time">21:40</span>
+                <span class="msg-speaker">你</span>
+              </div>
+              <div class="msg-bubble">
+                出地铁的时候吹了会儿夜风，不算太冷。你还记得我们上周散步时路过的那家旧书店吗？
+              </div>
+            </div>
+          </div>
+
+          <div class="memory-capsule-wrap">
+            <button
+              type="button"
+              class="memory-micro-capsule"
+              id="initial-memory-capsule"
+              aria-expanded="false"
+            >
+              <span class="capsule-spark"></span>
+              <span>翻阅了关于上周散步的记忆</span>
+              <span class="capsule-chevron">&gt;</span>
+            </button>
+            <div class="memory-trace-drawer" id="initial-memory-drawer" hidden>
+              <div class="trace-drawer-header">
+                <span>第一人称记忆原肉摘录 · 散步手记</span>
+                <span>十日前留痕</span>
+              </div>
+              <p>
+                「那天傍晚梧桐叶落了一地，我们在街角停下来看那扇亮着暖黄壁灯的墨绿木门。你说等哪天下雨不用赶时间，想进去找本旧诗集坐一下午。」
+              </p>
+            </div>
+          </div>
+
+          <div class="msg-row is-resident">
+            <div class="msg-avatar">
+              <img
+                class="resident-avatar-img"
+                src="./assets/default_pack/normal.png"
+                alt="星尘云团"
+              />
+            </div>
+            <div class="msg-content-wrap">
+              <div class="msg-meta">
+                <span class="msg-speaker">傲娇猫咪 · 林栖</span>
+                <span class="msg-time">21:41</span>
+              </div>
+              <div class="msg-bubble">
+                当然记得，街角有扇墨绿色木门、推门会响起低音铜铃的那家。那天傍晚风里都是干爽的落叶味，你说等哪天下雨想进去坐一下午。我昨天独处翻书单的时候，还顺手替你记下了他们店里常备的几本小开本诗集。
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <footer class="composer-dock">
+          <div class="quick-prompts-row" aria-label="快捷对话体验">
+            <button type="button" class="prompt-chip" data-prompt="你昨天替我记下了哪几本书单？">
+              问问他记下的旧书店书单
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="今天稍微有点累，想安静待一会儿。">
+              告诉他今天有些累想静静待着
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="夜深了，我们准备说晚安吧。">
+              道一声晚安看困倦态过渡
+            </button>
+          </div>
+
+          <form class="composer-capsule" id="composer-form" autocomplete="off">
+            <input
+              type="text"
+              id="composer-input"
+              class="composer-input"
+              placeholder="和他说点什么，或者静静待一会儿..."
+              aria-label="发送给星尘云团的消息"
+            />
+            <button type="submit" class="composer-send-btn">
+              <span>回响</span>
+              <svg class="send-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+          </form>
+        </footer>
+      </main>
+
+      <!-- 像素猫咪调控微面板（右下角微浮岛：支持 7 态即时触发与伴侣召回） -->
+      <aside class="wanderer-dock-panel" aria-label="像素猫咪状态调控">
+        <div class="dock-header-row">
+          <span class="dock-label">全画布像素猫咪 · 7态心境</span>
+          <span class="dock-current-state" id="dock-expression-tag">normal · 常态</span>
+        </div>
+        <div class="dock-emotions-row">
+          <button type="button" class="dock-btn is-active" data-emotion="normal">常态</button>
+          <button type="button" class="dock-btn" data-emotion="happy">开心</button>
+          <button type="button" class="dock-btn" data-emotion="aggrieved">委屈</button>
+          <button type="button" class="dock-btn" data-emotion="alienated">疏离</button>
+          <button type="button" class="dock-btn" data-emotion="sleepy">困倦</button>
+          <button type="button" class="dock-btn" data-emotion="yearning">想念</button>
+          <button type="button" class="dock-btn" data-emotion="solitary">独居</button>
+        </div>
+        <div class="dock-action-row">
+          <span>可拖拽猫猫 / 点击互动</span>
+          <button type="button" class="dock-call-btn" id="call-near-btn">跳到输入框边揣手</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="./bundle.js"></script>
+</body>
+</html>
