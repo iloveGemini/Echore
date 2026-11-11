@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Echore · 内部算法联调与性格测试台 (Observatory & Testbench)</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="workbench-layout">
+    <!-- 顶栏状态 -->
+    <header class="top-bar">
+      <div class="brand">
+        <span class="status-indicator" id="sse-status" title="SSE 连接状态"></span>
+        <span class="title">ECHORE OBSERVATORY & TESTBENCH</span>
+        <span class="badge" id="version-tag">M3.4 Ready</span>
+      </div>
+      <div class="top-meta">
+        <span class="meta-item">虚拟时间：<strong id="clock-display">--:--</strong> (<span id="date-display">----</span>)</span>
+        <span class="meta-item">当前住户：<strong id="persona-name-display">林栖</strong></span>
+        <span class="meta-item">主导原型：<span class="tag-archetype" id="archetype-badge">cat_aloof</span></span>
+      </div>
+    </header>
+
+    <!-- 主体双栏工作台 -->
+    <main class="workbench-main">
+      <!-- 左栏：陪伴对话与心境视窗 -->
+      <section class="panel panel-companion">
+        <div class="panel-header">
+          <h2>对话间 & 心境交接 (Companion Surface)</h2>
+          <div class="handover-pill" id="handover-pill">
+            <span class="expression-badge" id="expression-badge">normal</span>
+            <span class="tone-text" id="tone-text">基调平静稳定</span>
+          </div>
+        </div>
+
+        <!-- 牵挂提示栏 -->
+        <div class="concerns-strip" id="concerns-strip">
+          <span class="strip-label">盘旋牵挂：</span>
+          <span class="strip-content" id="concerns-content">暂无牵挂</span>
+        </div>
+
+        <!-- 对话消息列表 -->
+        <div class="chat-stream" id="chat-stream">
+          <div class="system-hint">正在连接 Echore 后端服务并拉取状态...</div>
+        </div>
+
+        <!-- 对话输入栏 -->
+        <footer class="chat-footer">
+          <form class="chat-form" id="chat-form">
+            <input
+              type="text"
+              id="chat-input"
+              class="chat-input"
+              placeholder="输入对话内容，测试当前人设的回应与内分泌反应..."
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn-primary" id="send-btn">发送</button>
+          </form>
+          <div class="chat-quick-tests">
+            <span class="quick-label">快速话术：</span>
+            <button type="button" class="btn-chip" data-msg="好久不见，最近忙什么呢？">普通打招呼</button>
+            <button type="button" class="btn-chip" data-msg="你今天怎么这么笨，说了几次还不明白！">故意冒犯/冲突</button>
+            <button type="button" class="btn-chip" data-msg="刚才是我态度不好，对不起，不要生气啦。">真诚道歉/和解</button>
+            <button type="button" class="btn-chip" data-msg="今天工作被夸了，特别开心！">分享暖心/喜悦</button>
+          </div>
+        </footer>
+      </section>
+
+      <!-- 右栏：造物主观测台与性格算法测试台 -->
+      <section class="panel panel-observatory">
+        <div class="panel-header">
+          <h2>性格算法与内分泌观测台 (Observatory)</h2>
+          <button type="button" class="btn btn-sm" id="refresh-state-btn">刷新状态</button>
+        </div>
+
+        <div class="observatory-scroll-area">
+          <!-- 模块 1：性格原型切换与参数查看 -->
+          <div class="obs-card">
+            <div class="card-title">
+              <span>性格原型切换 (Archetype Switcher)</span>
+              <span class="card-sub">内置 5 套内分泌参数与行为槽位</span>
+            </div>
+            <div class="archetype-selector-row">
+              <select id="archetype-select" class="form-select">
+                <option value="cat_aloof">傲娇猫系 · cat_aloof（外冷内热 / 敏感长半衰期）</option>
+                <option value="dog_sunny">阳光犬系 · dog_sunny（直球热忱 / 易复原快代谢）</option>
+                <option value="cool_detached">清冷智性 · cool_detached（慢热深水 / 高阈值深思考）</option>
+                <option value="clingy_sensitive">黏人高敏 · clingy_sensitive（患得患失 / 高皮质醇需求）</option>
+                <option value="steady_anchor">温厚沉稳 · steady_anchor（长久守护 / 情绪极稳兜底）</option>
+              </select>
+              <button type="button" class="btn btn-accent" id="apply-archetype-btn">应用原型</button>
+            </div>
+            <div class="archetype-options-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="reset-hormones-check" checked />
+                <span>切换时重置激素至舒适基线 (Reset to baseline)</span>
+              </label>
+            </div>
+
+            <!-- 当前原型参数矩阵 -->
+            <div class="profile-matrix" id="profile-matrix">
+              <div class="matrix-col">
+                <div class="matrix-title">基线与底值 (B_h / F_h)</div>
+                <div class="matrix-value" id="matrix-baseline">加载中...</div>
+              </div>
+              <div class="matrix-col">
+                <div class="matrix-title">敏感度 & 半衰期 (α_h / T_1/2)</div>
+                <div class="matrix-value" id="matrix-sens-halflife">加载中...</div>
+              </div>
+            </div>
+
+            <!-- 行为槽位展示 -->
+            <div class="slots-box" id="slots-box">
+              <div class="slot-item"><span>委屈/芥蒂：</span><em id="slot-hurt">--</em></div>
+              <div class="slot-item"><span>想念主动：</span><em id="slot-missing">--</em></div>
+              <div class="slot-item"><span>独居无聊：</span><em id="slot-bored">--</em></div>
+              <div class="slot-item"><span>亲近雀跃：</span><em id="slot-warm">--</em></div>
+            </div>
+          </div>
+
+          <!-- 模块 2：4 激素实时仪表盘 -->
+          <div class="obs-card">
+            <div class="card-title">
+              <span>内分泌激素实时数值 (Hormones Monitor)</span>
+              <span class="card-sub" id="last-step-time">步进时间：--</span>
+            </div>
+            <div class="hormone-grid">
+              <!-- 皮质醇 -->
+              <div class="hormone-cell">
+                <div class="cell-head">
+                  <span class="h-name">皮质醇 Cortisol</span>
+                  <span class="h-val" id="val-cortisol">0.00</span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-fill fill-cort" id="bar-cortisol" style="width: 0%"></div>
+                </div>
+                <div class="cell-foot">芥蒂/压力 · 警戒线 > 0.45</div>
+              </div>
+
+              <!-- 催产素 -->
+              <div class="hormone-cell">
+                <div class="cell-head">
+                  <span class="h-name">催产素 Oxytocin</span>
+                  <span class="h-val" id="val-oxytocin">0.00</span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-fill fill-oxy" id="bar-oxytocin" style="width: 0%"></div>
+                </div>
+                <div class="cell-foot">亲密归属 · 想念底线 < F_ox</div>
+              </div>
+
+              <!-- 多巴胺 -->
+              <div class="hormone-cell">
+                <div class="cell-head">
+                  <span class="h-name">多巴胺 Dopamine</span>
+                  <span class="h-val" id="val-dopamine">0.00</span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-fill fill-dopa" id="bar-dopamine" style="width: 0%"></div>
+                </div>
+                <div class="cell-foot">探索活力 · 无聊底线 < F_da</div>
+              </div>
+
+              <!-- 褪黑素 -->
+              <div class="hormone-cell">
+                <div class="cell-head">
+                  <span class="h-name">褪黑素 Melatonin</span>
+                  <span class="h-val" id="val-melatonin">0.00</span>
+                </div>
+                <div class="progress-bar">
+                  <div class="progress-fill fill-mela" id="bar-melatonin" style="width: 0%"></div>
+                </div>
+                <div class="cell-foot">昼夜作息 · 睡眠锁 >= 0.75</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 模块 3：核心引擎单步测试台 -->
+          <div class="obs-card">
+            <div class="card-title">
+              <span>三环引擎触发控制 (Engine Triggers)</span>
+              <span class="card-sub">单步心跳 · 时间快进 · 夜间冷闭环</span>
+            </div>
+            <div class="triggers-grid">
+              <div class="trigger-group">
+                <div class="group-label">【环 2】单步自主心跳</div>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-action" id="btn-heartbeat">
+                    触发心跳 (Heartbeat Tick)
+                  </button>
+                </div>
+                <div class="trigger-desc">推进 4 激素自然衰减并由 Arbitrator 分流 (A破冰/B独居/C静默)</div>
+              </div>
+
+              <div class="trigger-group">
+                <div class="group-label">时间快进仿真 (Time Travel)</div>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-outline" data-ff="4h">+4小时</button>
+                  <button type="button" class="btn btn-outline" data-ff="24h">+24小时</button>
+                  <button type="button" class="btn btn-outline" data-ff="5d">+5天 (冷战态)</button>
+                  <button type="button" class="btn btn-outline" data-ff="15d">+15天 (记忆沉底)</button>
+                </div>
+                <div class="trigger-desc">一键快进验证激素衰减回归、想念区触底与冷战 Cap_ox 封顶</div>
+              </div>
+
+              <div class="trigger-group">
+                <div class="group-label">【环 3】夜间睡眠结转</div>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-warning" id="btn-sleep">
+                    手动执行入睡结转 (Sleep Cycle)
+                  </button>
+                </div>
+                <div class="trigger-desc">触发前台睡前小结、肝脏结转、记忆编译器落盘与 Linter CI</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 模块 4：实时 SSE 事件日志监控 -->
+          <div class="obs-card">
+            <div class="card-title">
+              <span>实时 SSE 事件流 (Live Event Stream)</span>
+              <button type="button" class="btn-link" id="clear-events-btn">清屏</button>
+            </div>
+            <div class="events-log" id="events-log">
+              <div class="log-entry log-info">[系统] 等待事件注入...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

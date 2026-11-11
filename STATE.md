@@ -1,11 +1,11 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-10（完成 M3.4 主场模式极薄 HTTP + SSE 服务层 `src/loop/http-server.ts` 落地与测试，前后端双通道接口已就绪）。
+> 最后更新：2026-11-11（补全 `web/app.js` 内部算法联调与性格测试台前端事件绑定及 HTTP/SSE 全接口对接逻辑，验证 36/36 测试全绿）。
 
-## 1. 当前阶段与核心决议（2026-11-10）
+## 1. 当前阶段与核心决议（2026-11-11）
 
-- **当前阶段**：**M1、M2、M3（M3.1 感知独居 / M3.2 环 2 心跳 / M3.3 MCP 与快进台 / M3.4 主场 HTTP+SSE 服务层）全部完成**，下一步进入 **前端界面设计与联调**。
+- **当前阶段**：**M1、M2、M3 全部完成**，已交付 **前端对话间三风格交互原型 Demo (`notes/design/demos/index.html`)** 与 **内部算法联调及性格测试台 (`web/`)**，下一步进入 **F1 正式前端界面定稿与后端联调**。
 - **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.3）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
 - **M1 / M2 已落地交付项（摘要）**：
   - `src/core/`、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 3 昼夜睡眠新陈代谢环）。
@@ -18,7 +18,9 @@
 - **M3.3 & M3.4 已落地交付项（双模外壳：MCP 出差 + 时间快进台 + 主场 HTTP/SSE 服务层）**：
   1. **MCP Server 出差模式外壳 (`src/loop/mcp-server.ts` · `EchoreMcpServer`)**：暴露 4 个零泄露潜意识接口（`echore_wake_context`、`echore_recall`、`echore_digest_turn`、`echore_write_journal`）与 JSON-RPC 2.0 协议分发。
   2. **时间快进仿真台 (`src/loop/simulator.ts` · `TimeTravelSimulator`)**：支持一键快进任意时长（`4h` / `5d` / `15d`），自动驱动环 2 与跨夜环 3。
-  3. **主场模式极薄 HTTP + SSE 服务层 (`src/loop/http-server.ts` · `createEchoreHttpApp` / `startEchoreHttpServer`)**：严格切分「陪伴主视图通道（`GET /api/companion/state`、`POST /api/chat`，强制过 `assertNoInternalLeaks`）」与「造物主观测台通道（`GET /api/observatory/state`、`POST /api/heartbeat`、`POST /api/fast-forward`、`POST /api/sleep`）」及 `GET /api/events` SSE 实时事件流。
+  3. **主场模式极薄 HTTP + SSE 服务层与联调测试台 (`src/loop/http-server.ts` · `web/`)**：严格切分「陪伴主视图通道（`GET /api/companion/state`、`POST /api/chat`，强制过 `assertNoInternalLeaks`）」与「造物主观测台通道（`GET /api/observatory/state`、`GET /api/observatory/archetypes`、`POST /api/observatory/persona`、`POST /api/heartbeat`、`POST /api/fast-forward`、`POST /api/sleep`）」及 `GET /api/events` SSE 实时事件流，并由 `web/{index.html,styles.css,app.js}` 提供双栏联调测试台。
+- **前端对话间交互 Demo (`notes/design/demos/`)**：
+  - 纯原生 HTML5 + CSS + ES Module JS 单页实现（`index.html`、`styles.css`、`pixel-mascot.js`、`pixel-wanderer.js`、`app.js`、`bundle.js`），**升级为性格动物塑「傲娇猫咪 (cat_aloof)」轮廓清晰 32x32 像素精灵**：四足交替猫步、输入框边缘猫咪揣手手 (Cat Loaf)、气泡边缘双爪扒拉探头、7 态飞机耳/踩奶/舔爪动作，以及全画布物理拖拽和 Claude 日夜双色。
 
 ---
 
@@ -34,9 +36,9 @@
 
 ---
 
-## 3. 验证结果与运行备忘（2026-11-10）
+## 3. 验证结果与运行备忘（2026-11-11）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → 在 **`TZ=UTC`、`TZ=Asia/Shanghai`、`TZ=America/New_York` 三个时区及本机默认环境下均为 9 个测试文件、35/35 项测试（302 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **9 个测试文件、36/36 项测试（314 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
 - **已知问题**：无阻塞问题；后端三环引擎与 HTTP/SSE 服务层均已就绪，可进入前端设计。

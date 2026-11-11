@@ -7,10 +7,12 @@ import { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
   type ChronotypeId,
+  PersonaConfigSchema,
   SolitaryActionKindSchema,
   type SubconsciousHandover,
   WeatherSnapshotSchema,
 } from "../core/schemas.ts";
+import { ARCHETYPE_PRESETS } from "../endocrine/archetypes.ts";
 import { buildSubconsciousHandover } from "../endocrine/handover.ts";
 import { stepHormones } from "../endocrine/hormones.ts";
 import {
@@ -20,7 +22,10 @@ import {
 import { loadOrInitSolitaryProjects } from "../frontstage/solitary.ts";
 import { syncMemoryMetaFromFiles } from "../hippocampus/decay.ts";
 import { runMemoryLinter } from "../hippocampus/linter.ts";
-import { OrganModelRouter } from "../llm/router.ts";
+import {
+  createOrganRouterFromEnv,
+  OrganModelRouter,
+} from "../llm/router.ts";
 import type { LLMProvider } from "../llm/types.ts";
 import type { DesktopWindowSample } from "../perception/desktop-probe.ts";
 import { evaluateReflexGuard } from "../reflex/guard.ts";
@@ -59,7 +64,8 @@ export type SseEventType =
   | "proactive_message"
   | "heartbeat"
   | "fast_forward"
-  | "sleep_cycle";
+  | "sleep_cycle"
+  | "persona_updated";
 
 export interface SseEventPayload {
   type: SseEventType;
@@ -138,9 +144,11 @@ export interface EchoreHttpApp {
 export function createEchoreHttpApp(options: {
   engine: EchoreEngine;
   simulator?: TimeTravelSimulator;
+  staticDir?: string;
 }): EchoreHttpApp {
   const { engine } = options;
   const simulator = options.simulator ?? new TimeTravelSimulator(engine);
+  const staticDir = options.staticDir ?? path.resolve(process.cwd(), "web");
   const sseSubscribers = new Set<(chunk: string) => void>();
 
   const broadcastEvent = (type: SseEventType, data: unknown): void => {
@@ -455,6 +463,82 @@ export function createEchoreHttpApp(options: {
         return jsonResponse(sleepOut);
       }
 
+      // 8. 观测台：获取 5 套内置人设原型与当前人设详情: GET /api/observatory/archetypes
+      if (req.method === "GET" && pathname === "/api/observatory/archetypes") {
+        return jsonResponse({
+          current: {
+            name: engine.profile.name,
+            dominant_archetype: engine.profile.dominant_archetype,
+            chronotype: engine.profile.chronotype,
+            baseline: engine.profile.baseline,
+            resting_floor: engine.profile.resting_floor,
+            sensitivity: engine.profile.sensitivity,
+            half_life_hours: engine.profile.half_life_hours,
+            fast_relief_ratio: engine.profile.fast_relief_ratio,
+            mood_action_slots: engine.profile.mood_action_slots,
+          },
+          presets: ARCHETYPE_PRESETS,
+        });
+      }
+
+      // 9. 观测台：切换/覆写性格原型: POST /api/observatory/persona
+      if (req.method === "POST" && pathname === "/api/observatory/persona") {
+        const rawBody = await req.json();
+        const UpdatePersonaBodySchema = z.object({
+          persona: PersonaConfigSchema,
+          resetHormonesToBaseline: z.boolean().optional(),
+        });
+        const parsed = UpdatePersonaBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid persona update body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const newProfile = engine.updatePersona(parsed.data.persona, {
+          resetHormonesToBaseline: parsed.data.resetHormonesToBaseline,
+        });
+        broadcastEvent("persona_updated", {
+          name: newProfile.name,
+          dominant_archetype: newProfile.dominant_archetype,
+          chronotype: newProfile.chronotype,
+        });
+        return jsonResponse({
+          success: true,
+          profile: newProfile,
+        });
+      }
+
+      // 10. 极轻静态文件托管（开发者联调与性格测试台）
+      if (req.method === "GET" && !pathname.startsWith("/api/")) {
+        const MIME_TYPES: Record<string, string> = {
+          ".html": "text/html; charset=utf-8",
+          ".css": "text/css; charset=utf-8",
+          ".js": "application/javascript; charset=utf-8",
+          ".json": "application/json; charset=utf-8",
+          ".png": "image/png",
+          ".svg": "image/svg+xml",
+          ".ico": "image/x-icon",
+          ".txt": "text/plain; charset=utf-8",
+        };
+        const relPath =
+          pathname === "/" ? "index.html" : pathname.replace(/^\//, "");
+        const safePath = path.normalize(relPath).replace(/^(\.\.[\/\\])+/, "");
+        const filePath = path.join(staticDir, safePath);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const ext = path.extname(filePath).toLowerCase();
+          const contentType = MIME_TYPES[ext] || "application/octet-stream";
+          const fileBytes = fs.readFileSync(filePath);
+          return new Response(fileBytes, {
+            status: 200,
+            headers: {
+              "Content-Type": contentType,
+              ...CORS_HEADERS,
+            },
+          });
+        }
+      }
+
       return jsonResponse({ error: `Not Found: ${req.method} ${pathname}` }, 404);
     } catch (err) {
       return jsonResponse(
@@ -478,10 +562,12 @@ export function startEchoreHttpServer(options: {
   simulator?: TimeTravelSimulator;
   port?: number;
   hostname?: string;
+  staticDir?: string;
 }) {
   const app = createEchoreHttpApp({
     engine: options.engine,
     simulator: options.simulator,
+    staticDir: options.staticDir,
   });
   const server = Bun.serve({
     port: options.port ?? Number(process.env.PORT || 3377),
@@ -545,7 +631,8 @@ if (import.meta.main) {
     dbPath: path.join(baseDir, "echore.sqlite"),
     clock,
   });
-  const router = new OrganModelRouter({ defaultProvider: fallbackProvider });
+  const { router, modeDescription } =
+    createOrganRouterFromEnv(fallbackProvider);
   const engine = new EchoreEngine({
     clock,
     db,
@@ -562,4 +649,6 @@ if (import.meta.main) {
   console.log(
     `[Echore HTTP/SSE Server] Listening on http://${server.hostname}:${server.port}`,
   );
+  console.log(`[Echore LLM Router] ${modeDescription}`);
+  console.log(`[Echore Data Dir]   ${baseDir}`);
 }

@@ -1,3 +1,5 @@
+import { AnthropicAdapter } from "./anthropic.ts";
+import { OpenAICompatAdapter } from "./openai-compat.ts";
 import type { LLMProvider, OrganRole } from "./types.ts";
 
 export interface OrganModelRoute {
@@ -14,6 +16,102 @@ export const DEFAULT_ORGAN_MODELS: Record<OrganRole, string> = {
   worker: "claude-sonnet-5-5",
   endocrine: "claude-haiku-5-5",
 };
+
+export const DEFAULT_OPENAI_ORGAN_MODELS: Record<OrganRole, string> = {
+  frontstage: "gpt-4o",
+  compiler: "gpt-4o",
+  worker: "gpt-4o-mini",
+  endocrine: "gpt-4o-mini",
+};
+
+/**
+ * 从环境变量（或 Bun 自动加载的 `.env`）创建四岗位模型路由器。
+ * - 若配置了 `ANTHROPIC_API_KEY`，默认使用 `AnthropicAdapter`；
+ * - 若配置了 `OPENAI_API_KEY`，默认使用 `OpenAICompatAdapter`（支持 OpenAI / DeepSeek / OpenRouter / 本地代理等 `OPENAI_BASE_URL`）；
+ * - 支持按岗位覆写模型名：`ECHORE_FRONTSTAGE_MODEL`、`ECHORE_ENDOCRINE_MODEL`、`ECHORE_COMPILER_MODEL`、`ECHORE_WORKER_MODEL`（或统一 `ECHORE_MODEL` / `OPENAI_MODEL`）；
+ * - 若均未配置，回退至传入的 `fallbackProvider`。
+ */
+export function createOrganRouterFromEnv(
+  fallbackProvider: LLMProvider,
+  env: Record<string, string | undefined> = process.env,
+): { router: OrganModelRouter; modeDescription: string } {
+  const anthropicKey = env.ANTHROPIC_API_KEY?.trim();
+  const openaiKey = env.OPENAI_API_KEY?.trim();
+
+  if (anthropicKey) {
+    const provider = new AnthropicAdapter({
+      apiKey: anthropicKey,
+      baseURL: env.ANTHROPIC_BASE_URL?.trim() || undefined,
+    });
+    const sharedModel = env.ECHORE_MODEL?.trim();
+    const frontstageModel =
+      env.ECHORE_FRONTSTAGE_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_ORGAN_MODELS.frontstage;
+    const endocrineModel =
+      env.ECHORE_ENDOCRINE_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_ORGAN_MODELS.endocrine;
+    const compilerModel =
+      env.ECHORE_COMPILER_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_ORGAN_MODELS.compiler;
+    const workerModel =
+      env.ECHORE_WORKER_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_ORGAN_MODELS.worker;
+
+    return {
+      router: new OrganModelRouter({
+        frontstage: { provider, model: frontstageModel },
+        endocrine: { provider, model: endocrineModel },
+        compiler: { provider, model: compilerModel },
+        worker: { provider, model: workerModel },
+      }),
+      modeDescription: `Anthropic (${frontstageModel} / endocrine:${endocrineModel})`,
+    };
+  }
+
+  if (openaiKey) {
+    const baseURL = env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1";
+    const provider = new OpenAICompatAdapter({
+      apiKey: openaiKey,
+      baseURL,
+    });
+    const sharedModel = env.ECHORE_MODEL?.trim() || env.OPENAI_MODEL?.trim();
+    const frontstageModel =
+      env.ECHORE_FRONTSTAGE_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_OPENAI_ORGAN_MODELS.frontstage;
+    const endocrineModel =
+      env.ECHORE_ENDOCRINE_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_OPENAI_ORGAN_MODELS.endocrine;
+    const compilerModel =
+      env.ECHORE_COMPILER_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_OPENAI_ORGAN_MODELS.compiler;
+    const workerModel =
+      env.ECHORE_WORKER_MODEL?.trim() ||
+      sharedModel ||
+      DEFAULT_OPENAI_ORGAN_MODELS.worker;
+
+    return {
+      router: new OrganModelRouter({
+        frontstage: { provider, model: frontstageModel },
+        endocrine: { provider, model: endocrineModel },
+        compiler: { provider, model: compilerModel },
+        worker: { provider, model: workerModel },
+      }),
+      modeDescription: `OpenAI-Compatible @ ${baseURL} (${frontstageModel} / endocrine:${endocrineModel})`,
+    };
+  }
+
+  return {
+    router: new OrganModelRouter({ defaultProvider: fallbackProvider }),
+    modeDescription: "Local Fallback Mock (未检测到 ANTHROPIC_API_KEY 或 OPENAI_API_KEY)",
+  };
+}
 
 /**
  * 按岗位模型路由器（Organ Model Router）

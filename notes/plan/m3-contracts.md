@@ -211,6 +211,10 @@
    - 请求体：`{ duration: string | number, stepMinutes?: number }`，调用 `TimeTravelSimulator.fastForward()`，返回 `SimulationReport`。
 4. **`POST /api/sleep`**：
    - 手动触发【环 3：昼夜新陈代谢环】`engine.runSleepCycle(options)`，返回 `SleepCycleOutput`。
+5. **`GET /api/observatory/archetypes` & `POST /api/observatory/persona`**：
+   - 供性格算法测试台读取 5 套内置内分泌原型（`ARCHETYPE_PRESETS`）并支持动态切换当前住户人设/原型（可选重置激素至舒适基线 `resetHormonesToBaseline`）。
+6. **静态测试台托管（`GET /` · `web/`）**：
+   - 托管 `web/index.html`、`web/styles.css`、`web/app.js` 内部算法联调与性格测试台界面。
 
 ### 4.3 实时事件流通道（`GET /api/events` · Server-Sent Events）
 
@@ -218,4 +222,4 @@
   - `connected`：连接建立握手；
   - `chat_turn`：实时对话完成（仅含零泄露陪伴摘要）；
   - `proactive_message`：环 2 分支 A 主动破冰消息（强制过 `assertNoInternalLeaks`，供聊天主窗口直接渲染住户主动发来的气泡）；
-  - `heartbeat` / `fast_forward` / `sleep_cycle`：通知观测台刷新内部状态与时间轴。
+  - `heartbeat` / `fast_forward` / `sleep_cycle` / `persona_updated`：通知观测台刷新内部状态、人设原型与时间轴。

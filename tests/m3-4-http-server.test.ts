@@ -237,4 +237,62 @@ describe("M3.4 主场模式极薄 HTTP + SSE 服务层 (Companion vs Observatory
       ctx.cleanup();
     }
   });
+
+  test("4. 性格测试台接口与静态托管 (GET /api/observatory/archetypes, POST /api/observatory/persona, GET / & /app.js)", async () => {
+    const ctx = setupHttpTestApp();
+    try {
+      // 1) GET /api/observatory/archetypes
+      const archRes = await ctx.app.fetch(
+        new Request("http://localhost:3377/api/observatory/archetypes"),
+      );
+      expect(archRes.status).toBe(200);
+      const archJson = (await archRes.json()) as {
+        current: { dominant_archetype: string };
+        presets: Record<string, unknown>;
+      };
+      expect(archJson.current.dominant_archetype).toBe("cat_aloof");
+      expect("dog_sunny" in archJson.presets).toBe(true);
+
+      // 2) POST /api/observatory/persona 切换为 dog_sunny 并重置基线
+      const personaRes = await ctx.app.fetch(
+        new Request("http://localhost:3377/api/observatory/persona", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            persona: {
+              name: "向阳",
+              archetype: "dog_sunny",
+              chronotype: "early_bird",
+            },
+            resetHormonesToBaseline: true,
+          }),
+        }),
+      );
+      expect(personaRes.status).toBe(200);
+      const personaJson = (await personaRes.json()) as {
+        success: boolean;
+        profile: { name: string; dominant_archetype: string };
+      };
+      expect(personaJson.success).toBe(true);
+      expect(personaJson.profile.name).toBe("向阳");
+      expect(personaJson.profile.dominant_archetype).toBe("dog_sunny");
+
+      // 3) 静态文件托管 GET / 与 GET /app.js
+      const htmlRes = await ctx.app.fetch(new Request("http://localhost:3377/"));
+      expect(htmlRes.status).toBe(200);
+      expect(htmlRes.headers.get("Content-Type")).toContain("text/html");
+
+      const jsRes = await ctx.app.fetch(
+        new Request("http://localhost:3377/app.js"),
+      );
+      expect(jsRes.status).toBe(200);
+      expect(jsRes.headers.get("Content-Type")).toContain(
+        "application/javascript",
+      );
+      const jsText = await jsRes.text();
+      expect(jsText).toContain("/api/observatory/persona");
+    } finally {
+      ctx.cleanup();
+    }
+  });
 });

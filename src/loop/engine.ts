@@ -247,7 +247,7 @@ export class EchoreEngine {
   readonly clock: Clock;
   readonly db: EchoreDatabase;
   readonly memoryDir: string;
-  readonly profile: ResolvedEndocrineProfile;
+  profile: ResolvedEndocrineProfile;
   readonly router: OrganModelRouter;
   private readonly frontstageTools: ZodTool[];
   private readonly appendOnlyHistory: ChatMessage[] = [];
@@ -277,6 +277,24 @@ export class EchoreEngine {
       );
       this.db.saveHormoneState(initHormones);
     }
+  }
+
+  /**
+   * 动态更新住户人设/内分泌原型（供性格测试台与领养流程实时切换）
+   */
+  updatePersona(
+    persona: PersonaConfig,
+    options?: { resetHormonesToBaseline?: boolean },
+  ): ResolvedEndocrineProfile {
+    this.profile = resolvePersonaProfile(persona);
+    if (options?.resetHormonesToBaseline) {
+      const resetHormones = createInitialHormoneState(
+        this.profile,
+        this.clock.now(),
+      );
+      this.db.saveHormoneState(resetHormones);
+    }
+    return this.profile;
   }
 
   getHistory(): readonly ChatMessage[] {
