@@ -1,14 +1,15 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-12（完成记忆系统进化 **Wave 1–4 全部落地**，以及**修复跨午夜作息睡眠代谢跳过昨日起居日对话与记忆编译的关键 Bug**，验证 46/46 测试全绿）。
+> 最后更新：2026-11-12（完成记忆系统进化 **Wave 1–4 全部落地**、**跨午夜作息睡眠游标与日记封底修复**，以及**全系统 9 路 LLM 提示词解耦收敛至 `prompts/*.md`**，验证 48/48 测试全绿）。
 
 ## 1. 当前阶段与核心决议（2026-11-12）
 
 - **当前阶段**：**M1、M2、M3 与记忆进化 Wave 1–4 全部完成**；下一步进入 **F1 正式前端定稿与后端联调**。
 - **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.4）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)（v2 已完成）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
 - **M1 / M2 / Wave 1–4 已落地交付项（摘要）**：
-  - `src/core/`、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 3 昼夜睡眠新陈代谢环）。
+  - `src/core/`（含 `prompts.ts` 与 `prompts/*.md` 读时热加载）、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal,solitary}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 2 自主心跳环 + 环 3 昼夜睡眠新陈代谢环）。
+  - **LLM 提示词外置化 (`prompts/*.md` & `src/core/prompts.ts`，2026-11-12，借鉴自 Psyche)**：将全系统 4 器官 9 个 LLM 调用点的系统提示词（`frontstage-system.md`、`proactive-wake.md`、`solitary-roaming.md`、`solitary-project.md`、`solitary-prep.md`、`bedtime-reflection.md`、`silent-worker.md`、`endocrine-pulse.md`、`memory-compiler.md`）统一收敛至顶层 [`prompts/`](prompts/README.md)，带 `version` 与 `organ` frontmatter，读时现读不缓存、支持 `promptsDir` 沙箱覆写。
   - **Wave 1 夜间编译止血与原子回滚护栏（2026-11-12）**：
     1. **Z 式冲突待复核门 (`src/hippocampus/compiler.ts`)**：保护 `allow_forget: false` 钉子记忆与 `people/*` 定义档；对未显式声明 `supersedes` 的 `preference / life_event / chat` 槽位碰撞，保留旧文件为 `有效`，将新断言降级为 `情境表态(...)` 并记入 `pendingConflicts`。
     2. **L7 记忆颗粒度机检 (`src/hippocampus/linter.ts`)**：拦截单文件断言过载（`> 6` 条，`too_coarse`）、正文超长（`> 600` 字符，`too_coarse`）与空洞/未格式化断言（`needs_rewrite`）。
@@ -62,7 +63,7 @@
 
 ## 3. 验证结果与运行备忘（2026-11-12）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **10 个测试文件、46/46 项测试（442 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **10 个测试文件、48/48 项测试（486 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
 - **已知问题**：无阻塞问题；跨午夜起居日闭环已打通，后端三环引擎与 HTTP/SSE 服务层就绪，可进入前端设计。

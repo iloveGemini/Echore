@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { type Clock, formatLocalDateStr, formatLocalTimeHm } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
+import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
   type CompilationPlan,
@@ -106,6 +107,8 @@ export interface EchoreEngineOptions {
   router: OrganModelRouter;
   frontstageTools?: ZodTool[];
   workerTools?: ZodTool[];
+  /** 提示词目录，缺省仓库 prompts/（测试可换临时目录） */
+  promptsDir?: string;
 }
 
 export interface ReactiveTurnOptions {
@@ -292,6 +295,7 @@ export class EchoreEngine {
   readonly clock: Clock;
   readonly db: EchoreDatabase;
   readonly memoryDir: string;
+  readonly promptsDir: string;
   profile: ResolvedEndocrineProfile;
   readonly router: OrganModelRouter;
   private readonly frontstageTools: ZodTool[];
@@ -303,12 +307,14 @@ export class EchoreEngine {
     this.clock = options.clock;
     this.db = options.db;
     this.memoryDir = options.memoryDir;
+    this.promptsDir = options.promptsDir ?? PROMPTS_DIR;
     this.profile = resolvePersonaProfile(options.persona);
     this.router = options.router;
 
     const silentWorkerTool = createSilentWorkerTool(
       this.router,
       options.workerTools ?? [],
+      this.promptsDir,
     );
     this.frontstageTools = [
       silentWorkerTool,
@@ -514,21 +520,7 @@ export class EchoreEngine {
     }
 
     const route = this.router.getRoute("endocrine");
-    const system = [
-      "你是 Echore 的后台情绪官（内分泌脉冲评估器）。",
-      "请结合「常驻默契滤网（rapport.md）」、「最近对话上下文」与「当前活跃牵挂注」评估用户最新话语的情绪脉冲，只输出合法的 JSON 对象。",
-      "JSON 字段规范：",
-      "- event_summary (string): 本轮互动简述",
-      "- confidence (number, 0~1): 语义判断置信度（似嗔似笑或语境模糊时给 < 0.75）",
-      "- is_conflict (boolean): 是否构成真实冒犯/冲突",
-      "- is_reconciliation (boolean): 用户是否在真诚道歉、解释清楚或哄好已有牵挂",
-      "- is_warm (boolean), is_novel (boolean), matched_rapport_joke (boolean)",
-      "- triggered_scar_zone (string, optional): 若触碰结痂雷区则填写雷区标签",
-      "- cortisol_delta (-1~1), oxytocin_delta (-1~1), dopamine_delta (-1~1)",
-      "- new_concern (optional): { id?: string, tier: 'minor_worry' | 'conflict' | 'scar', summary: string, floor_cort?: number }（当产生新的日常惦记或实质冲突时必填）",
-      "- reconciled_concern_ids (string[]): 被本轮和解消除的活跃牵挂 ID 列表",
-      "- ambiguity_probe_hint (string, optional): 置信度 < 0.75 时递给前台的试探基调提示",
-    ].join("\n");
+    const system = readPrompt("endocrine-pulse.md", this.promptsDir).text;
 
     const recentTurnsText =
       recentHistory.length > 0
@@ -773,6 +765,7 @@ export class EchoreEngine {
       perceptionSlice: resolvedPerceptionSlice,
       secretPrepNote: resolvedSecretPrepNote,
       latestUserMessage: userMessage,
+      promptsDir: this.promptsDir,
     });
 
     // 核销本轮已递入前台的 S3 暗中准备标记，防后续重复触发
@@ -948,13 +941,17 @@ export class EchoreEngine {
         const rapportBody = sanitizeRapportForFrontstage(
           this.loadRapportMarkdown(),
         );
+        const proactivePromptText = readPrompt(
+          "proactive-wake.md",
+          this.promptsDir,
+        ).text;
         const system = [
           `# 住户身份：${this.profile.name}`,
           this.profile.core_persona,
           rapportBody ? `\n# 两人内隐默契\n${rapportBody}` : "",
           "",
           `主动搭话习性：${this.profile.mood_action_slots.when_missing_user}`,
-          "请以第一人称“我”向对方发一条简短自然的主动搭话（1~2 句话），严禁暴露任何系统参数或数字。",
+          proactivePromptText,
         ]
           .filter(Boolean)
           .join("\n");
@@ -1046,6 +1043,7 @@ export class EchoreEngine {
         feedFetcher: options.feedFetcher,
         tools: this.frontstageTools,
         overrideNoteText: options.overrideSolitaryNoteText,
+        promptsDir: this.promptsDir,
       });
 
       return {
@@ -1136,6 +1134,7 @@ export class EchoreEngine {
         handover: currentHandover,
         todaysEvents,
         overrideReflectionText: options.overrideReflectionText,
+        promptsDir: this.promptsDir,
       });
 
       // Step 2: [情绪官] 夜间肝脏结算，出具《情绪结转裁决单》
@@ -1158,6 +1157,7 @@ export class EchoreEngine {
         allowSupersedeProtected: options.allowSupersedeProtected,
         chronotype: this.profile.chronotype,
         todaysEvents,
+        promptsDir: this.promptsDir,
       });
       // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L7 终检 + git commit
       const decayReport = runDailyMemoryDecayAndArchive({

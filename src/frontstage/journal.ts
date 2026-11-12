@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { formatLocalTimeHm } from "../core/clock.ts";
+import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
   type EventLogRecord,
@@ -267,6 +268,7 @@ export async function synthesizeBedtimeReflection(params: {
   handover?: SubconsciousHandover;
   todaysEvents?: readonly EventLogRecord[];
   overrideReflectionText?: string;
+  promptsDir?: string;
 }): Promise<string> {
   const {
     router,
@@ -277,6 +279,7 @@ export async function synthesizeBedtimeReflection(params: {
     handover,
     todaysEvents = [],
     overrideReflectionText,
+    promptsDir = PROMPTS_DIR,
   } = params;
 
   const timeStr = formatLocalTimeHm(now);
@@ -305,16 +308,11 @@ export async function synthesizeBedtimeReflection(params: {
   }
 
   const route = router.getRoute("frontstage");
+  const bedtimePromptText = readPrompt("bedtime-reflection.md", promptsDir).text;
   const system = [
     `# 住户身份与自身标尺：${profile.name}`,
     profile.core_persona,
-    "",
-    "现在是睡前时刻。请对照你自己的性格底色，结合今天随手记下的片段与真实对话原话反馈（他说 → 我回 → 他随后反应），以第一人称“我”写一段简短、真实、带自己脾气的睡前自省日记（1~3 句话）。",
-    "要求：",
-    "- 只写纯正文自然语言，必须包含第一人称认知（“我”或自身视角）；",
-    "- 若发现自己白天哪句话顺着他敷衍了、或者他的真实反应和我想的不一样，如实写下复盘感受，不自我美化；",
-    "- 严禁写 YAML 头、Markdown 标题或任何系统参数；",
-    "- 严禁无根据地编造白天没发生过的事件。",
+    ...(bedtimePromptText ? ["", bedtimePromptText] : []),
   ].join("\n");
 
   const userPromptParts = [

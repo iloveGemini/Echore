@@ -1,5 +1,6 @@
 export * from "./core/clock.ts";
 export * from "./core/db.ts";
+export * from "./core/prompts.ts";
 export * from "./core/schemas.ts";
 export * from "./endocrine/archetypes.ts";
 export * from "./endocrine/evaluator.ts";

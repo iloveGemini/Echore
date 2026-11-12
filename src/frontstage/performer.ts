@@ -1,4 +1,5 @@
 import matter from "gray-matter";
+import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
   type SubconsciousHandover,
@@ -29,15 +30,13 @@ export function sanitizeRapportForFrontstage(rawRapportMarkdown: string): string
 
 export function buildStaticSystemPartA(
   profile: ResolvedEndocrineProfile,
+  promptsDir = PROMPTS_DIR,
 ): string {
+  const systemRuleText = readPrompt("frontstage-system.md", promptsDir).text;
   const text = [
     `# 住户身份：${profile.name}`,
     profile.core_persona,
-    "",
-    "## 第一人称主权与拟调节准绳",
-    "- 你是唯一拥有第一人称“我”的传主，用自然真实的口吻与对方相处。",
-    "- 严禁零成本冒领虚假的戏剧化体验；你的态度、亲疏与分寸自然受当下心境基调与盘旋心事的调节。",
-    "- 潜意识递给你的心境与回忆是你自己脑海里的印象，自然化用，绝不复诵格式标签。",
+    ...(systemRuleText ? ["", systemRuleText] : []),
   ].join("\n");
 
   assertNoInternalLeaks(text, "buildStaticSystemPartA");
@@ -86,8 +85,9 @@ export function assembleSandwichRequest(params: {
   perceptionSlice?: string;
   secretPrepNote?: string;
   latestUserMessage: string;
+  promptsDir?: string;
 }): SandwichRequest {
-  const systemPartA = buildStaticSystemPartA(params.profile);
+  const systemPartA = buildStaticSystemPartA(params.profile, params.promptsDir);
   const systemPartB = sanitizeRapportForFrontstage(params.rawRapportMarkdown);
   const subconsciousBlock = buildDynamicSubconsciousBlock({
     handover: params.handover,
@@ -129,6 +129,7 @@ export async function performFrontstageTurn(params: {
   secretPrepNote?: string;
   latestUserMessage: string;
   maxToolSteps?: number;
+  promptsDir?: string;
 }): Promise<{
   replyText: string;
   sandwichRequest: SandwichRequest;
@@ -147,6 +148,7 @@ export async function performFrontstageTurn(params: {
     perceptionSlice: params.perceptionSlice,
     secretPrepNote: params.secretPrepNote,
     latestUserMessage: params.latestUserMessage,
+    promptsDir: params.promptsDir,
   });
 
   const toolRunnerResult = await runToolLoop({

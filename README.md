@@ -41,7 +41,7 @@
 | 模块 | 职责与定位 | 状态 | 核心设计章节 |
 | :--- | :--- | :--- | :--- |
 | **多模型路由与工具环 (`src/llm/`)** | 极薄双 Adapter（Anthropic + OpenAI 兼容）、Zod `toolRunner`、按岗位模型混搭路由、三明治缓存组装 | ✅ 已完成 (M1) | [总纲 §6.6, §7.2](notes/design/architecture-and-memory-spec.md) |
-| **底座与骨层存储 (`src/core/`)** | `VirtualClock` 虚拟时钟、`bun:sqlite` 事件日志/激素表/牵挂表、Zod 核心契约 | ✅ 已完成 (M1) | [总纲 §3.1, §7.3](notes/design/architecture-and-memory-spec.md) |
+| **底座与骨层存储 (`src/core/` · `prompts/`)** | `VirtualClock` 虚拟时钟、`bun:sqlite` 事件日志/激素表/牵挂表、Zod 核心契约、`prompts/*.md` 提示词热加载器 | ✅ 已完成 (M1) | [总纲 §3.1, §7.3](notes/design/architecture-and-memory-spec.md) |
 | **反射层守卫 (`src/reflex/`)** | 纯代码脊髓守卫：褪黑素睡眠锁、静默窗、连续 2 次主动未回退避锁 | ✅ 已完成 (M1) | [总纲 §1.1](notes/design/architecture-and-memory-spec.md) |
 | **情绪官 (`src/endocrine/`)** | 5 套内分泌原型模板、4 激素双锚点数学引擎、三级牵挂演化（琐事/冷战/留疤）、出厂前四道调准、交接单与夜间裁决单 | ✅ 已完成 (M1/M2) | [总纲 §2](notes/design/architecture-and-memory-spec.md) |
 | **记忆官 (`src/hippocampus/`)** | 三桶五路召回、原话引文预水合、唯一 Markdown 编译器、`rapport.md` 内隐默契、定步长衰减沉底、L1–L6 Linter | ✅ 已完成 (M1/M2) | [总纲 §3, §4, §5](notes/design/architecture-and-memory-spec.md) |

@@ -4,6 +4,11 @@ import YAML from "yaml";
 import { type Clock, formatLocalTimeHm } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
+  PROMPTS_DIR,
+  type PromptFileName,
+  readPrompt,
+} from "../core/prompts.ts";
+import {
   assertNoInternalLeaks,
   type ConcernRecord,
   type EventLogRecord,
@@ -39,6 +44,7 @@ export interface SolitaryTickOptions {
   feedFetcher?: WorldFeedFetcher;
   tools?: ZodTool[];
   overrideNoteText?: string;
+  promptsDir?: string;
 }
 
 export interface SolitaryTickResult {
@@ -122,27 +128,27 @@ function sanitizeFirstPersonText(raw: string): string {
 async function generateFirstPersonSolitaryNote(params: {
   router: OrganModelRouter;
   profile: ResolvedEndocrineProfile;
-  systemTaskHint: string;
+  promptFile: PromptFileName;
   userPrompt: string;
   fallbackText: string;
   tools?: ZodTool[];
   overrideNoteText?: string;
+  promptsDir?: string;
 }): Promise<string> {
   if (params.overrideNoteText?.trim()) {
     return sanitizeFirstPersonText(params.overrideNoteText);
   }
 
   const route = params.router.getRoute("frontstage");
+  const taskInstructions = readPrompt(
+    params.promptFile,
+    params.promptsDir ?? PROMPTS_DIR,
+  ).text;
   const system = [
     `# 住户身份：${params.profile.name}`,
     params.profile.core_persona,
     `独居习性提示：${params.profile.mood_action_slots.when_bored_alone}`,
-    "",
-    params.systemTaskHint,
-    "铁律：",
-    "- 必须全程使用第一人称“我”撰写，保留真实脾气与主观感受；",
-    "- 严禁暴露任何系统参数、激素数字或 log-* 编号；",
-    "- 只输出纯正文笔记（2~4 句话），不要包裹多余代码块。",
+    ...(taskInstructions ? ["", taskInstructions] : []),
   ].join("\n");
 
   let rawReplyText = "";
@@ -253,6 +259,7 @@ export async function runSolitaryTick(
     feedFetcher = createWorldFeedFetcher(),
     tools,
     overrideNoteText,
+    promptsDir = PROMPTS_DIR,
   } = options;
 
   const now = clock.now();
@@ -300,8 +307,7 @@ export async function runSolitaryTick(
     firstPersonNote = await generateFirstPersonSolitaryNote({
       router,
       profile,
-      systemTaskHint:
-        "你趁着独处闲暇翻到了感兴趣的一篇文章，请写下几句带自己脾气的阅读批注、槽点或摘抄感想。",
+      promptFile: "solitary-roaming.md",
       userPrompt: [
         `文章标题：《${primary.title}》（来源：${primary.source}）`,
         `文章链接：${primary.url}`,
@@ -310,6 +316,7 @@ export async function runSolitaryTick(
       fallbackText: `我下午闲着翻到了《${primary.title}》，里面写到的细节挺对胃口，随手摘了几句留着回头聊。`,
       tools,
       overrideNoteText,
+      promptsDir,
     });
 
     artifactRelPath = "solitary/reading_notes.md";
@@ -352,8 +359,7 @@ export async function runSolitaryTick(
     firstPersonNote = await generateFirstPersonSolitaryNote({
       router,
       profile,
-      systemTaskHint:
-        "你正在推进自己的跨天个人小项目（Persistent Goal Tree），请以第一人称完成当前章节/节点的具体手记内容。",
+      promptFile: "solitary-project.md",
       userPrompt: [
         `项目名称：${project.title}`,
         `项目简介：${project.description}`,
@@ -362,6 +368,7 @@ export async function runSolitaryTick(
       fallbackText: `我趁着独处把${project.title}推进到了「${activeNode.title}」，整理好了这一节的观察笔记。`,
       tools,
       overrideNoteText,
+      promptsDir,
     });
 
     const artifactsDir = path.join(solitaryDir, "artifacts");
@@ -410,12 +417,12 @@ export async function runSolitaryTick(
     firstPersonNote = await generateFirstPersonSolitaryNote({
       router,
       profile,
-      systemTaskHint:
-        "你趁用户不在时，围绕心里惦记的他的近况或日程，暗中帮他查了点实用资料/攻略，请以第一人称写一份自然、贴心、带自己口吻的小备忘。",
+      promptFile: "solitary-prep.md",
       userPrompt: `惦记事项：${concernSummary}`,
       fallbackText: `我惦记着「${concernSummary}」，趁空闲顺手帮他翻了翻靠谱的注意事项与备忘清单，等他回来正好递过去。`,
       tools,
       overrideNoteText,
+      promptsDir,
     });
 
     artifactRelPath = "solitary/prep_for_user.md";

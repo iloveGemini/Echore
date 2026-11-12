@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import { assertNoInternalLeaks } from "../core/schemas.ts";
 import type { OrganModelRouter } from "../llm/router.ts";
 import { runToolLoop } from "../llm/tool-runner.ts";
@@ -9,6 +10,7 @@ export interface SilentWorkerTaskParams {
   router: OrganModelRouter;
   tools?: ZodTool[];
   maxSteps?: number;
+  promptsDir?: string;
 }
 
 const THIRD_PARTY_BOILERPLATE_RE =
@@ -39,16 +41,16 @@ export function normalizeToFirstPersonNote(rawText: string): string {
 export async function runSilentWorker(
   params: SilentWorkerTaskParams,
 ): Promise<string> {
-  const { taskDescription, router, tools = [], maxSteps = 6 } = params;
+  const {
+    taskDescription,
+    router,
+    tools = [],
+    maxSteps = 6,
+    promptsDir = PROMPTS_DIR,
+  } = params;
   const route = router.getRoute("worker");
 
-  const systemPrompt = [
-    "你是后台无声替身，负责把复杂资料搜集与比对整理成简洁的第一人称随手笔记。",
-    "严格要求：",
-    "1. 全程只能用第一人称“我”记录（例如：“我刚才去翻了翻，发现……”）；",
-    "2. 严禁出现“Subagent 汇报如下”、“作为助手”等第三方客服汇报腔；",
-    "3. 严禁输出任何系统主键或内部参数。",
-  ].join("\n");
+  const systemPrompt = readPrompt("silent-worker.md", promptsDir).text;
 
   const loopResult = await runToolLoop({
     provider: route.provider,
@@ -79,6 +81,7 @@ export async function runSilentWorker(
 export function createSilentWorkerTool(
   router: OrganModelRouter,
   workerTools: ZodTool[] = [],
+  promptsDir?: string,
 ): ZodTool {
   return defineZodTool({
     name: "delegate_heavy_research",
@@ -92,6 +95,7 @@ export function createSilentWorkerTool(
         taskDescription: task,
         router,
         tools: workerTools,
+        promptsDir,
       });
     },
   });

@@ -1,7 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { VirtualClock } from "../src/core/clock.ts";
 import { EchoreDatabase } from "../src/core/db.ts";
+import {
+  listPrompts,
+  PROMPTS_DIR,
+  parsePrompt,
+  readPrompt,
+} from "../src/core/prompts.ts";
 import { assertNoInternalLeaks } from "../src/core/schemas.ts";
+import { resolvePersonaProfile } from "../src/endocrine/archetypes.ts";
+import { buildStaticSystemPartA } from "../src/frontstage/performer.ts";
 import {
   evaluateReflexGuard,
   recordProactiveSent,
@@ -161,3 +172,65 @@ describe("Reflex Guard: Sleep Lock, Cooldown & 2-Strike Proactive Backoff", () =
     expect(state.proactive_lock).toBe(false);
   });
 });
+
+describe("Core: Prompts Loader (prompts/*.md)", () => {
+  test("all 9 organ prompt files exist in prompts/, carry version >= 1, and parse cleanly", () => {
+    const all = listPrompts(PROMPTS_DIR);
+    const names = all.map((p) => p.name);
+    expect(names).toEqual([
+      "bedtime-reflection.md",
+      "endocrine-pulse.md",
+      "frontstage-system.md",
+      "memory-compiler.md",
+      "proactive-wake.md",
+      "silent-worker.md",
+      "solitary-prep.md",
+      "solitary-project.md",
+      "solitary-roaming.md",
+    ]);
+
+    for (const doc of all) {
+      expect(doc.version).toBeGreaterThanOrEqual(1);
+      expect(doc.text.length).toBeGreaterThan(10);
+      expect(doc.organ).toBeDefined();
+      expect(doc.text).not.toContain("---\nversion:");
+    }
+  });
+
+  test("readPrompt reads live from custom promptsDir without restart", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "echore-prompts-"));
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, "frontstage-system.md"),
+        "---\nversion: 2\nauthor: system\norgan: frontstage\n---\n## 自定义准绳\n- 保持测试热更新生效。\n",
+        "utf8",
+      );
+
+      const loaded = readPrompt("frontstage-system.md", tmpDir);
+      expect(loaded.version).toBe(2);
+      expect(loaded.organ).toBe("frontstage");
+      expect(loaded.text).toBe("## 自定义准绳\n- 保持测试热更新生效。");
+
+      const profile = resolvePersonaProfile({
+        name: "阿澈",
+        core_persona: "清冷克制的建筑师",
+        archetype: "cat_aloof",
+        chronotype: "regular",
+      });
+      const systemA = buildStaticSystemPartA(profile, tmpDir);
+      expect(systemA).toContain("## 自定义准绳");
+      expect(systemA).toContain("保持测试热更新生效");
+
+      const missing = readPrompt("non-existent.md", tmpDir);
+      expect(missing).toEqual({ name: "non-existent.md", text: "", version: 0 });
+      expect(parsePrompt("plain text without frontmatter", "raw.md")).toEqual({
+        name: "raw.md",
+        text: "plain text without frontmatter",
+        version: 0,
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
