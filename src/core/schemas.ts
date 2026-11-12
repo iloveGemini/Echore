@@ -252,6 +252,7 @@ export const RapportRuleSpecSchema = z.object({
   section: z.enum(["专属称呼与黑话", "语感与边界默契", "结痂雷区"]),
   predicate_line: z.string().min(1),
   source_event_id: z.string().regex(/^log-/),
+  revises_rule_prefix: z.string().min(1).optional(),
 });
 export type RapportRuleSpec = z.infer<typeof RapportRuleSpecSchema>;
 

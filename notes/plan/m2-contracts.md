@@ -76,10 +76,19 @@ M2 聚焦跑通 **【环 3：昼夜新陈代谢环 Circadian Sleep Loop】** 及
 - `CompiledMemorySpecSchema` / `CompilationPlanSchema`：约束记忆官编译输出的断言结构、取代目标与 `rapport.md` 增量规则。
 
 ### 2.2 `src/frontstage/journal.ts`
+- `FeedbackTriplet`:
+  ```ts
+  {
+    prev: EventLogRecord | null;
+    acts: EventLogRecord[];
+    next: EventLogRecord | null;
+  }
+  ```
+- `extractFeedbackTriplets(events: readonly EventLogRecord[], maxGapMs?: number): FeedbackTriplet[]`（Wave 4：按相邻消息 $\le 30\text{min}$ 时间窗切分连续对话段，机械配对 `她说(prev) -> 我回(acts) -> 她紧接着反应(next)`）
 - `extractHotEntriesForDate(memoryDir: string, dateStr: string): string[]`
 - `extractColdReflectionForDate(memoryDir: string, dateStr: string): string | null`
 - `appendColdReflectionEntry(input: { memoryDir: string; dateStr: string; timeStr: string; reflectionText: string }): string`
-- `synthesizeBedtimeReflection(params: { router: OrganModelRouter; profile: ResolvedEndocrineProfile; memoryDir: string; dateStr: string; now: Date; handover?: SubconsciousHandover; overrideReflectionText?: string }): Promise<string>`
+- `synthesizeBedtimeReflection(params: { router: OrganModelRouter; profile: ResolvedEndocrineProfile; memoryDir: string; dateStr: string; now: Date; handover?: SubconsciousHandover; todaysEvents?: readonly EventLogRecord[]; overrideReflectionText?: string }): Promise<string>`
 
 ### 2.3 `src/endocrine/handover.ts`
 - `settleNightlyConcerns(params: { db: EchoreDatabase; profile: ResolvedEndocrineProfile; now: Date }): EndocrineNightVerdict`
@@ -102,6 +111,7 @@ M2 聚焦跑通 **【环 3：昼夜新陈代谢环 Circadian Sleep Loop】** 及
   - **Z 式冲突待复核门（Wave 1 止血护栏）**：
     - 仅当新记忆显式指定 `supersedes` 或属于客观短期状态流转（`category: "health" | "schedule"` 且谓词为 `当前状态`）且旧文件非受保护身份/偏好钉子记忆时，才自动将同槽位旧文件翻为 `status: 已取代`；
     - 若撞上受保护钉子记忆（`allow_forget: false` 且非短期 `health/schedule` 状态流转，或 `people/*` 符号定义），或 `preference / life_event / chat` 未显式声明 `supersedes` 发生同槽位值冲突：旧文件保持 `有效` 不动，新文件中的冲突断言自动降级为历时/情境豁免谓词 `情境表态([[subject]]#slot, ...)`，并记入 `NightlyCompileResult.pendingConflicts`。
+  - **默契条件收窄修订（Wave 4）**：`RapportRuleSpecSchema` 支持可选 `revises_rule_prefix?: string`；当夜间编译根据 `prev -> acts -> next` 原话反例需要对既有 `rapport.md` 默契条目收窄适用条件时，就地替换匹配的旧规则行并更新 `[src: log-xxx]`。
 
 ### 2.5 `src/hippocampus/decay.ts`
 - `CATEGORY_HALF_LIFE_DAYS`: `Record<MemoryCategory, number>` (`chat: 7, schedule: 14, solitary: 14, life_event: 30, health: 30, preference: 90`)

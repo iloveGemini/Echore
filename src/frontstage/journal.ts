@@ -3,11 +3,127 @@ import path from "node:path";
 import { formatLocalTimeHm } from "../core/clock.ts";
 import {
   assertNoInternalLeaks,
+  type EventLogRecord,
   type SubconsciousHandover,
 } from "../core/schemas.ts";
 import type { ResolvedEndocrineProfile } from "../endocrine/archetypes.ts";
 import { renderHandoverYaml } from "../endocrine/handover.ts";
 import type { OrganModelRouter } from "../llm/router.ts";
+
+export const DEFAULT_FEEDBACK_SEGMENT_GAP_MS = 30 * 60_000;
+
+export interface FeedbackTriplet {
+  prev: EventLogRecord | null;
+  acts: EventLogRecord[];
+  next: EventLogRecord | null;
+}
+
+/**
+ * Wave 4.1 基于 30min 时间窗切段的双向原话反馈链提取（吸收自 Psyche `review.md` & `coldwrite.ts`）：
+ * - 相邻消息时间差 > 30min 视为不同对话段，绝不跨断档强行配对；
+ * - 在同一连续对话段内，机械配对「用户前一句 prev → 住户连续回复 acts → 用户紧接着的真实反应 next」。
+ */
+export function extractFeedbackTriplets(
+  events: readonly EventLogRecord[],
+  maxGapMs = DEFAULT_FEEDBACK_SEGMENT_GAP_MS,
+): FeedbackTriplet[] {
+  const dialogEvents = events.filter(
+    (e) => e.role === "user" || e.role === "assistant",
+  );
+  if (dialogEvents.length === 0) return [];
+
+  // 1. 按相邻时间差 <= maxGapMs 切分为连续对话段
+  const segments: EventLogRecord[][] = [];
+  let currentSeg: EventLogRecord[] = [];
+
+  for (const ev of dialogEvents) {
+    if (currentSeg.length === 0) {
+      currentSeg.push(ev);
+      continue;
+    }
+    const prevEv = currentSeg[currentSeg.length - 1]!;
+    const prevMs = Date.parse(prevEv.timestamp);
+    const currMs = Date.parse(ev.timestamp);
+    if (
+      Number.isFinite(prevMs) &&
+      Number.isFinite(currMs) &&
+      currMs - prevMs > maxGapMs
+    ) {
+      segments.push(currentSeg);
+      currentSeg = [ev];
+    } else {
+      currentSeg.push(ev);
+    }
+  }
+  if (currentSeg.length > 0) {
+    segments.push(currentSeg);
+  }
+
+  // 2. 在每个连续段内提取 prev -> acts -> next 三联包
+  const triplets: FeedbackTriplet[] = [];
+  for (const seg of segments) {
+    let i = 0;
+    let lastUserEv: EventLogRecord | null = null;
+    while (i < seg.length) {
+      const ev = seg[i]!;
+      if (ev.role === "user") {
+        lastUserEv = ev;
+        i += 1;
+        continue;
+      }
+      const acts: EventLogRecord[] = [];
+      while (i < seg.length && seg[i]!.role === "assistant") {
+        acts.push(seg[i]!);
+        i += 1;
+      }
+      const nextUserEv =
+        i < seg.length && seg[i]!.role === "user" ? seg[i]! : null;
+      triplets.push({
+        prev: lastUserEv,
+        acts,
+        next: nextUserEv,
+      });
+    }
+  }
+
+  return triplets;
+}
+
+function sanitizeFeedbackQuote(text: string): string {
+  return text
+    .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 140);
+}
+
+/**
+ * 将双向原话反馈链渲染为面向前台睡前自省的零主键文本块
+ */
+export function formatFeedbackTripletsForReflection(
+  triplets: readonly FeedbackTriplet[],
+): string {
+  if (triplets.length === 0) return "";
+  const lines = triplets.slice(-8).map((t) => {
+    const parts: string[] = [];
+    if (t.prev) {
+      parts.push(`他说：“${sanitizeFeedbackQuote(t.prev.content)}”`);
+    }
+    const actsText = t.acts
+      .map((a) => sanitizeFeedbackQuote(a.content))
+      .join(" / ");
+    parts.push(`我回：“${actsText}”`);
+    if (t.next) {
+      parts.push(`他随后反应：“${sanitizeFeedbackQuote(t.next.content)}”`);
+    } else {
+      parts.push(`（他随后未再接话）`);
+    }
+    return `- ${parts.join(" → ")}`;
+  });
+  const joined = lines.join("\n");
+  assertNoInternalLeaks(joined, "formatFeedbackTripletsForReflection");
+  return joined;
+}
 
 export interface HotJournalEntryInput {
   memoryDir: string;
@@ -149,6 +265,7 @@ export async function synthesizeBedtimeReflection(params: {
   dateStr: string;
   now: Date;
   handover?: SubconsciousHandover;
+  todaysEvents?: readonly EventLogRecord[];
   overrideReflectionText?: string;
 }): Promise<string> {
   const {
@@ -158,6 +275,7 @@ export async function synthesizeBedtimeReflection(params: {
     dateStr,
     now,
     handover,
+    todaysEvents = [],
     overrideReflectionText,
   } = params;
 
@@ -173,7 +291,10 @@ export async function synthesizeBedtimeReflection(params: {
   }
 
   const hotEntries = extractHotEntriesForDate(memoryDir, dateStr);
-  if (hotEntries.length === 0) {
+  const triplets = extractFeedbackTriplets(todaysEvents);
+  const feedbackBlock = formatFeedbackTripletsForReflection(triplets);
+
+  if (hotEntries.length === 0 && !feedbackBlock) {
     const quietReflection = `今日平淡无波澜，按时歇下。`;
     return appendColdReflectionEntry({
       memoryDir,
@@ -185,19 +306,23 @@ export async function synthesizeBedtimeReflection(params: {
 
   const route = router.getRoute("frontstage");
   const system = [
-    `# 住户身份：${profile.name}`,
+    `# 住户身份与自身标尺：${profile.name}`,
     profile.core_persona,
     "",
-    "现在是睡前时刻。请以第一人称“我”回顾今天随手记下的片段，写一段简短、真实、带自己脾气的睡前自省日记（1~3 句话）。",
+    "现在是睡前时刻。请对照你自己的性格底色，结合今天随手记下的片段与真实对话原话反馈（他说 → 我回 → 他随后反应），以第一人称“我”写一段简短、真实、带自己脾气的睡前自省日记（1~3 句话）。",
     "要求：",
     "- 只写纯正文自然语言，必须包含第一人称认知（“我”或自身视角）；",
+    "- 若发现自己白天哪句话顺着他敷衍了、或者他的真实反应和我想的不一样，如实写下复盘感受，不自我美化；",
     "- 严禁写 YAML 头、Markdown 标题或任何系统参数；",
     "- 严禁无根据地编造白天没发生过的事件。",
   ].join("\n");
 
   const userPromptParts = [
-    `[今日白天随手记]\n${hotEntries.map((e) => `- ${e}`).join("\n")}`,
+    `[今日白天随手记]\n${hotEntries.length > 0 ? hotEntries.map((e) => `- ${e}`).join("\n") : "（无）"}`,
   ];
+  if (feedbackBlock) {
+    userPromptParts.push(`[今日对话真实反馈原话链]\n${feedbackBlock}`);
+  }
   if (handover) {
     userPromptParts.push(`[当下心境]\n${renderHandoverYaml(handover)}`);
   }

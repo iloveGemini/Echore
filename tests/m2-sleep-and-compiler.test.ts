@@ -10,6 +10,7 @@ import { settleNightlyConcerns } from "../src/endocrine/handover.ts";
 import {
   appendHotJournalEntry,
   extractColdReflectionForDate,
+  extractFeedbackTriplets,
   synthesizeBedtimeReflection,
 } from "../src/frontstage/journal.ts";
 import { runNightlyCompiler } from "../src/hippocampus/compiler.ts";
@@ -1159,6 +1160,184 @@ allow_forget: false
     // Step 2 mutated `con-neck-sore` to `已淡化`, which must be restored back to `有效`!
     expect(db.getConcernById("con-neck-sore")?.status).toBe("有效");
     expect(db.getMemoryMeta("evt-overloaded-dump")).toBeNull();
+
+    fs.rmSync(memDir, { recursive: true, force: true });
+    db.close();
+  });
+
+  test("9. Wave 4 Feedback Triplets (30min window segmentation) & rapport.md counterexample condition narrowing (revises_rule_prefix)", async () => {
+    const clock = new VirtualClock("2026-11-12T23:30:00");
+    const db = new EchoreDatabase({ dbPath: ":memory:", clock });
+    const memDir = createTempMemoryRepo();
+
+    // Segment 1 (Morning 10:00 ~ 10:05, within 30min window)
+    const ev1User = db.appendEventLog({
+      id: "log-20261112-1000-001",
+      timestamp: new Date("2026-11-12T10:00:00").toISOString(),
+      role: "user",
+      speaker: "user",
+      content: "这版海报配色好像有点太花哨了",
+    });
+    const ev2Asst = db.appendEventLog({
+      id: "log-20261112-1002-002",
+      timestamp: new Date("2026-11-12T10:02:00").toISOString(),
+      role: "assistant",
+      speaker: "阿狸",
+      content: "确实有点花哨，要不全改成黑白灰？",
+    });
+    const ev3UserNext = db.appendEventLog({
+      id: "log-20261112-1005-003",
+      timestamp: new Date("2026-11-12T10:05:00").toISOString(),
+      role: "user",
+      speaker: "user",
+      content: "你也太顺着我说了吧，昨晚你还夸这组暖色有活力呢",
+    });
+
+    // Segment 2 (Night 23:10, > 30min gap from 10:05 -> must NOT pair with morning segment!)
+    const ev4NightUser = db.appendEventLog({
+      id: "log-20261112-2310-004",
+      timestamp: new Date("2026-11-12T23:10:00").toISOString(),
+      role: "user",
+      speaker: "user",
+      content: "困",
+    });
+    const ev5NightAsst = db.appendEventLog({
+      id: "log-20261112-2311-005",
+      timestamp: new Date("2026-11-12T23:11:00").toISOString(),
+      role: "assistant",
+      speaker: "阿狸",
+      content: "快去睡吧，别熬了。",
+    });
+
+    const todaysEvents = [
+      ev1User,
+      ev2Asst,
+      ev3UserNext,
+      ev4NightUser,
+      ev5NightAsst,
+    ];
+    const triplets = extractFeedbackTriplets(todaysEvents);
+
+    expect(triplets.length).toBe(2);
+    // Triplet 1 has prev -> acts -> next within the morning segment
+    expect(triplets[0]?.prev?.id).toBe(ev1User.id);
+    expect(triplets[0]?.acts[0]?.id).toBe(ev2Asst.id);
+    expect(triplets[0]?.next?.id).toBe(ev3UserNext.id);
+
+    // Triplet 2 is isolated in the night segment (next is null, not cross-paired)
+    expect(triplets[1]?.prev?.id).toBe(ev4NightUser.id);
+    expect(triplets[1]?.acts[0]?.id).toBe(ev5NightAsst.id);
+    expect(triplets[1]?.next).toBeNull();
+
+    // Verify bedtime reflection receives the raw feedback triplet chain without log-* leaks
+    let capturedPrompt = "";
+    const mockProvider: LLMProvider = {
+      providerName: "mock",
+      async generate(params: LLMGenerateParams): Promise<LLMResponse> {
+        capturedPrompt = params.messages[0]?.content ?? "";
+        return {
+          text: "今天上午他吐槽海报配色时我随口顺着他改了口，被他当场抓包提醒昨晚我明明夸过暖色好看，下次我得守住自己的判断。",
+          toolCalls: [],
+          stopReason: "end_turn",
+        };
+      },
+      async generateSandwich(): Promise<LLMResponse> {
+        throw new Error("Unused");
+      },
+    };
+    const router = new OrganModelRouter({
+      frontstage: { provider: mockProvider, model: "claude-opus-5-5" },
+      endocrine: { provider: mockProvider, model: "claude-haiku-5-5" },
+      compiler: { provider: mockProvider, model: "claude-opus-5-5" },
+      worker: { provider: mockProvider, model: "claude-sonnet-5-5" },
+    });
+    const profile = resolvePersonaProfile({
+      name: "阿狸",
+      archetype: "cat_aloof",
+      chronotype: "regular",
+    });
+
+    const reflection = await synthesizeBedtimeReflection({
+      router,
+      profile,
+      memoryDir: memDir,
+      dateStr: "2026-11-12",
+      now: clock.now(),
+      todaysEvents,
+    });
+    expect(capturedPrompt).toContain("[今日对话真实反馈原话链]");
+    expect(capturedPrompt).toContain("你也太顺着我说了吧");
+    expect(capturedPrompt).not.toMatch(/log-\d+/);
+    expect(reflection).toContain("守住自己的判断");
+
+    // Seed an overly broad rapport rule from Nov 1, then narrow its condition via `revises_rule_prefix`
+    const oldLog = db.appendEventLog({
+      id: "log-20261101-1200-009",
+      timestamp: "2026-11-01T12:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "烦",
+    });
+
+    await runNightlyCompiler({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+      dateStr: "2026-11-12",
+      verdict: {
+        date: "2026-11-12",
+        items: [],
+        hormone_bounds_after: { floor_cort: 0.15, cap_ox: 1.0 },
+      },
+      coldReflection: reflection,
+      planOverride: {
+        memories: [],
+        rapport_rules: [
+          {
+            section: "语感与边界默契",
+            predicate_line: '默契([[people/user]], "回单字代表心情烦躁不耐烦")',
+            source_event_id: oldLog.id,
+          },
+        ],
+      },
+    });
+
+    // Now narrow that rule using `revises_rule_prefix` after the late-night counterexample (`ev4NightUser`)
+    const narrowRes = await runNightlyCompiler({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+      dateStr: "2026-11-12",
+      verdict: {
+        date: "2026-11-12",
+        items: [],
+        hormone_bounds_after: { floor_cort: 0.15, cap_ox: 1.0 },
+      },
+      coldReflection: reflection,
+      planOverride: {
+        memories: [],
+        rapport_rules: [
+          {
+            section: "语感与边界默契",
+            revises_rule_prefix:
+              '默契([[people/user]], "回单字代表心情烦躁不耐烦")',
+            predicate_line:
+              '默契([[people/user]], "白天聊工作回单字代表烦躁，深夜回单字只是困了")',
+            source_event_id: ev4NightUser.id,
+          },
+        ],
+      },
+    });
+
+    expect(narrowRes.lintReport.passed).toBe(true);
+    const rapportAfter = fs.readFileSync(
+      path.join(memDir, "implicit", "rapport.md"),
+      "utf8",
+    );
+    expect(rapportAfter).toContain(
+      `- 默契([[people/user]], "白天聊工作回单字代表烦躁，深夜回单字只是困了") [src: ${ev4NightUser.id}]`,
+    );
+    expect(rapportAfter).not.toContain("回单字代表心情烦躁不耐烦");
 
     fs.rmSync(memDir, { recursive: true, force: true });
     db.close();

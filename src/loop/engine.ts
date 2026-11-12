@@ -983,7 +983,8 @@ export class EchoreEngine {
         now,
       });
 
-      // Step 1: [前台] 撰写第一人称睡前自省冷叙事
+      // Step 1: [前台] 撰写第一人称睡前自省冷叙事（附带今日 30min 时间窗双向原话反馈链）
+      const todaysEvents = this.db.getEventLogsByDate(dateStr);
       const coldReflection = await synthesizeBedtimeReflection({
         router: this.router,
         profile: this.profile,
@@ -991,6 +992,7 @@ export class EchoreEngine {
         dateStr,
         now,
         handover: currentHandover,
+        todaysEvents,
         overrideReflectionText: options.overrideReflectionText,
       });
 

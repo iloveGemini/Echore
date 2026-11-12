@@ -17,6 +17,7 @@ import {
 } from "../core/schemas.ts";
 import {
   extractColdReflectionForDate,
+  extractFeedbackTriplets,
   extractHotEntriesForDate,
 } from "../frontstage/journal.ts";
 import type { OrganModelRouter } from "../llm/router.ts";
@@ -220,6 +221,24 @@ export function appendRapportRulesToFile(params: {
       .trim();
     const formattedLine = `- ${baseLine} [src: ${rule.source_event_id}]`;
 
+    // Wave 4.2: 若指定了 revises_rule_prefix（默契反例条件收窄/分化），就地替换原规则行并更新 [src: log-xxx]
+    if (rule.revises_rule_prefix?.trim()) {
+      const targetPrefix = rule.revises_rule_prefix
+        .trim()
+        .replace(/^-\s*/, "");
+      const lines = raw.split(/\r?\n/);
+      const matchIdx = lines.findIndex((l) => {
+        const t = l.trim();
+        return t.startsWith("- ") && t.includes(targetPrefix);
+      });
+      if (matchIdx !== -1) {
+        lines[matchIdx] = formattedLine;
+        raw = lines.join("\n");
+        added.push(formattedLine);
+        continue;
+      }
+    }
+
     if (raw.includes(baseLine) || raw.includes(formattedLine)) {
       continue;
     }
@@ -346,6 +365,7 @@ async function generateCompilationPlanWithOrgan(params: {
   existingFiles: ParsedMemoryFile[];
   todaysEvents: Array<{
     id: string;
+    timestamp?: string;
     role: string;
     speaker: string;
     content: string;
@@ -384,16 +404,40 @@ async function generateCompilationPlanWithOrgan(params: {
     .map((e) => `- [${e.id}] (${e.role}/${e.speaker}): ${e.content}`)
     .join("\n");
 
+  const triplets = extractFeedbackTriplets(
+    todaysEvents.map((e) => ({
+      id: e.id,
+      timestamp: e.timestamp ?? `${dateStr}T12:00:00.000Z`,
+      role: (e.role === "user" || e.role === "assistant" || e.role === "solitary"
+        ? e.role
+        : "system") as "user" | "assistant" | "solitary" | "system",
+      speaker: e.speaker,
+      content: e.content,
+      metadata: {},
+    })),
+  );
+  const tripletsText = triplets
+    .map((t) => {
+      const p = t.prev ? `[${t.prev.id}] 他说: "${t.prev.content}"` : "（段首）";
+      const a = t.acts.map((x) => `[${x.id}] 我回: "${x.content}"`).join(" / ");
+      const n = t.next
+        ? `[${t.next.id}] 他随后反应: "${t.next.content}"`
+        : "（未再接话）";
+      return `- ${p} -> ${a} -> ${n}`;
+    })
+    .join("\n");
+
   const system = [
     "你是 Echore 的后台记忆官（夜间唯一 Markdown 编译器）。",
-    "请根据今日原始对话事件（带 log-* ID）、前台睡前自省冷叙事与现有活跃记忆，输出需要新增或状态变更的结构化编译计划 JSON。",
+    "请根据今日原始对话事件（带 log-* ID）、双向反馈三联链（prev -> acts -> next）、前台睡前自省冷叙事与现有活跃记忆，输出需要新增或状态变更的结构化编译计划 JSON。",
     "铁律：",
     "1. frontstage_narrative 必须原样采用前台日记中的第一人称原话，绝不自己捏造心理活动，且不得包含 log-* 或浮点数；",
     "2. 严格区分四种情况决定是否填 supersedes：",
     "   (a) 客观事实/状态迭代（如脚伤康复取代之前的脚踝扭伤、行程变更）-> 必须在 supersedes 填入旧记忆的 id；",
     "   (b) 一时情绪气话、(c) 反话/打趣玩笑、(d) 特定情境下的临时表态 -> 严禁填 supersedes 覆盖长期偏好或身份设定，应使用“情境表态(...)”谓词记录当晚片段；",
-    "3. 单文件断言控制在 1~6 条以内（原子化记忆），source_event_id 必须严格选用今日事件日志中真实存在的 log-* ID；",
-    "4. 仅输出合法的 JSON 对象，结构符合：{ memories: [...], rapport_rules: [...] }。",
+    "3. 若双向反馈链中出现反例证明某条既有 rapport 默契规则过于宽泛，可在 rapport_rules 中填写 revises_rule_prefix 收窄其适用条件；",
+    "4. 单文件断言控制在 1~6 条以内（原子化记忆），source_event_id 必须严格选用今日事件日志中真实存在的 log-* ID；",
+    "5. 仅输出合法的 JSON 对象，结构符合：{ memories: [...], rapport_rules: [...] }。",
   ].join("\n");
 
   const resp = await route.provider.generate({
@@ -407,6 +451,7 @@ async function generateCompilationPlanWithOrgan(params: {
           `[当前日期]\n${dateStr}`,
           `[今日前台热记事]\n${hotEntries.join("\n") || "（无）"}`,
           `[今日前台睡前自省原肉]\n${coldReflection}`,
+          `[今日双向原话反馈链 (prev -> acts -> next)]\n${tripletsText || "（无）"}`,
           `[情绪官夜间裁决单]\n${JSON.stringify(verdict.items)}`,
           `[现有活跃结构化记忆]\n${activeSummary || "（无）"}`,
           `[今日 SQLite 原始事件日志]\n${logsText}`,

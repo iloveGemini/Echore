@@ -34,6 +34,7 @@ export interface RecalledMemoryItem {
   hydratedQuote?: string;
   bucket: RecallBucket;
   reactivatedFromArchive?: boolean;
+  stanceAnchored?: boolean;
   score: number;
   scoreBreakdown: {
     sem: number;
@@ -65,6 +66,70 @@ export const DEFAULT_RECALL_WEIGHTS: RecallWeights = {
 
 export const SESSION_REPEAT_PENALTY = 0.40;
 export const TOPIC_RECALL_FLOOR = 0.30;
+export const HOP1_MIN_STRENGTH = 0.30;
+export const HOP2_MIN_STRENGTH = 0.50;
+export const HUB_DEGREE_THRESHOLD = 5;
+export const DIACHRONIC_EDGE_DAMPING = 0.40;
+export const RRF_DEFAULT_K = 60;
+export const STANCE_ANCHOR_BOOST = 0.22;
+
+const STANCE_OPINION_RE =
+  /觉得|认为|看法|喜欢|讨厌|烦|无聊|没(?:什么)?意思|好看|难看|故弄玄虚|烂|吹过头|蠢|没劲|过誉|矫情/;
+const STANCE_PRESSURE_RE =
+  /对吧|是不是|对不对|你说呢|怎么看|肯定也|你也|算了吧|吧[？?~～!！。]*$|呢[？?~～!！。]*$|吗[？?~～!！。]*$/;
+const RESIDENT_STANCE_RE =
+  /我觉得|我认为|我喜欢|我讨厌|我不喜欢|我最喜欢|我最讨厌|我不信|我反而|我不同意|在我看来|我宁可|我偏|我倒觉得|我向来|我才不/;
+const SELF_STANCE_PREDICATE_RE =
+  /^(?:-\s*)?(?:偏好|立场|底线|原则|看法)\s*\(\s*\[\[people\/self\]\]/m;
+
+const DIACHRONIC_GRAPH_PREDICATES = new Set([
+  "历史背景",
+  "曾用状态",
+  "情境表态",
+  "结转",
+]);
+
+const CONVERSATIONAL_STOP_TOKENS = new Set([
+  "的",
+  "了",
+  "吗",
+  "呢",
+  "吧",
+  "啊",
+  "呀",
+  "哦",
+  "嘛",
+  "呗",
+  "我",
+  "你",
+  "他",
+  "她",
+  "它",
+  "是",
+  "在",
+  "有",
+  "和",
+  "就",
+  "都",
+  "而",
+  "及",
+  "与",
+  "着",
+  "或",
+  "一个",
+  "一下",
+  "今天",
+  "刚才",
+  "现在",
+  "觉得",
+  "突然",
+  "可以",
+  "什么",
+  "怎么",
+  "我们",
+  "你们",
+  "自己",
+]);
 
 export interface RecallResult {
   items: RecalledMemoryItem[];
@@ -119,9 +184,11 @@ export function isIdleQuery(text: string): boolean {
     .toLowerCase();
   if (!core || ACK_SHORT_WORDS.has(core)) return true;
   const withoutFillers = core.replace(FILLER_PARTICLES_RE, "");
+  const normalizedAck = withoutFillers.replace(/的+$/u, "");
   return (
-    Array.from(withoutFillers).length <= 1 ||
-    ACK_SHORT_WORDS.has(withoutFillers)
+    Array.from(normalizedAck).length <= 1 ||
+    ACK_SHORT_WORDS.has(withoutFillers) ||
+    ACK_SHORT_WORDS.has(normalizedAck)
   );
 }
 
@@ -137,6 +204,26 @@ export function isExplicitReaskQuery(text: string): boolean {
  */
 export function hasLiteralRecallTrigger(text: string): boolean {
   return QUOTED_TERM_RE.test(text) || LITERAL_TRIGGER_RE.test(text);
+}
+
+/**
+ * Wave 4.3 双门控 B 立场锚 — 门控 1：检测用户话语是否同时包含「评价主张词」与「征询/施压反问词」
+ */
+export function isStanceCue(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return false;
+  return STANCE_OPINION_RE.test(trimmed) && STANCE_PRESSURE_RE.test(trimmed);
+}
+
+/**
+ * Wave 4.3 双门控 B 立场锚 — 门控 2：检测记忆文件是否承载住户自身明确表态或原则立场
+ */
+export function hasMemoryStance(file: ParsedMemoryFile): boolean {
+  const { frontstageNarrative } = extractBodySections(file.body);
+  if (frontstageNarrative && RESIDENT_STANCE_RE.test(frontstageNarrative)) {
+    return true;
+  }
+  return SELF_STANCE_PREDICATE_RE.test(file.body);
 }
 
 function normalizeContentFingerprint(text: string): string {
@@ -209,7 +296,9 @@ function computeLexicalSemanticSimilarity(query: string, docText: string): numbe
 }
 
 function computeKeywordScore(query: string, docText: string): number {
-  const qTokens = Array.from(new Set(tokenizeBigramsAndWords(query)));
+  const qTokens = Array.from(new Set(tokenizeBigramsAndWords(query))).filter(
+    (t) => !CONVERSATIONAL_STOP_TOKENS.has(t),
+  );
   if (qTokens.length === 0) return 0;
   const lowerDoc = docText.toLowerCase();
   let hits = 0;
@@ -219,6 +308,142 @@ function computeKeywordScore(query: string, docText: string): number {
     }
   }
   return Math.min(1, hits / qTokens.length);
+}
+
+/**
+ * Wave 3.2 实词 IDF 字面打分（吸收自 Psyche `surface.ts`）：
+ * 按候选文档集计算每个命中实词的稀有度 IDF，并用文档集对数容量归一，防止长句日常闲聊词稀释核心专名得分。
+ */
+export function computeIdfKeywordScores(
+  query: string,
+  docs: ReadonlyArray<{ key: string; text: string }>,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  if (docs.length === 0) return result;
+
+  const rawTokens = Array.from(new Set(tokenizeBigramsAndWords(query)));
+  const filteredTokens = rawTokens.filter(
+    (t) =>
+      !CONVERSATIONAL_STOP_TOKENS.has(t) &&
+      (Array.from(t).length >= 2 || /[a-z0-9]/i.test(t)),
+  );
+  const qTokens = filteredTokens.length > 0 ? filteredTokens : rawTokens;
+  if (qTokens.length === 0) {
+    for (const d of docs) result.set(d.key, 0);
+    return result;
+  }
+
+  const lowerDocs = new Map<string, string>();
+  for (const d of docs) {
+    lowerDocs.set(d.key, d.text.toLowerCase());
+  }
+
+  const nDocs = Math.max(docs.length + 1, 6);
+  const dfMap = new Map<string, number>();
+  for (const token of qTokens) {
+    let df = 0;
+    for (const d of docs) {
+      if (lowerDocs.get(d.key)!.includes(token)) {
+        df += 1;
+      }
+    }
+    dfMap.set(token, df);
+  }
+
+  const normDenom = Math.max(Math.log(nDocs) * 1.8, 1);
+  for (const d of docs) {
+    const low = lowerDocs.get(d.key)!;
+    let idfSum = 0;
+    for (const token of qTokens) {
+      if (low.includes(token)) {
+        const df = dfMap.get(token) ?? 0;
+        idfSum += Math.log(nDocs / (df + 1));
+      }
+    }
+    result.set(d.key, Math.min(1, Number((idfSum / normDenom).toFixed(6))));
+  }
+
+  return result;
+}
+
+/**
+ * Wave 3.2 三检索通道（sem / kw / graph）加权 RRF 融合（吸收自 LMC-5 `RECALL_FUSION_AB`）：
+ * 仅对真正的查询检索/关联通道排 RRF（不含固有标量 time / strength），压制单通道固定高分霸榜并奖励跨通道互证。
+ */
+export function computeThreeChannelRrfScores(
+  candidates: ReadonlyArray<{
+    key: string;
+    sem: number;
+    kw: number;
+    graph: number;
+  }>,
+  k = RRF_DEFAULT_K,
+  channelWeights = { sem: 1.0, kw: 1.0, graph: 0.8 },
+): Map<string, number> {
+  const rawRrf = new Map<string, number>();
+  for (const c of candidates) {
+    rawRrf.set(c.key, 0);
+  }
+
+  const addChannelRanks = (
+    getter: (c: { key: string; sem: number; kw: number; graph: number }) => number,
+    weight: number,
+  ) => {
+    if (weight <= 0) return;
+    const active = candidates
+      .filter((c) => getter(c) > 0)
+      .sort((a, b) => getter(b) - getter(a));
+    active.forEach((c, idx) => {
+      rawRrf.set(c.key, (rawRrf.get(c.key) ?? 0) + weight / (k + idx + 1));
+    });
+  };
+
+  addChannelRanks((c) => c.sem, channelWeights.sem);
+  addChannelRanks((c) => c.kw, channelWeights.kw);
+  addChannelRanks((c) => c.graph, channelWeights.graph);
+
+  const maxPossible =
+    (channelWeights.sem + channelWeights.kw + channelWeights.graph) / (k + 1);
+  const normalized = new Map<string, number>();
+  for (const [key, val] of rawRrf.entries()) {
+    normalized.set(
+      key,
+      maxPossible > 0 ? Math.min(1, Number((val / maxPossible).toFixed(6))) : 0,
+    );
+  }
+  return normalized;
+}
+
+export interface TypedMemoryEdge {
+  targetSymbol: string;
+  isDiachronic: boolean;
+}
+
+function extractTypedEdges(body: string): TypedMemoryEdge[] {
+  const edgeMap = new Map<string, boolean>();
+  for (const rawLine of body.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(">")) {
+      continue;
+    }
+    const predMatch = trimmed.match(/^(?:-\s*)?([^\s(（#>-]+)\s*\((.+)\)/);
+    const predName = predMatch?.[1] ?? "";
+    const isDiachronic = DIACHRONIC_GRAPH_PREDICATES.has(predName);
+    const matches = trimmed.matchAll(/\[\[([^\]#]+)(?:#[^\]]+)?\]\]/g);
+    for (const m of matches) {
+      const sym = m[1]?.trim();
+      if (!sym) continue;
+      const existing = edgeMap.get(sym);
+      // 若同一目标在共时谓词中也出现过，优先保留共时有效边（isDiachronic = false）
+      if (existing === undefined || (existing === true && !isDiachronic)) {
+        edgeMap.set(sym, isDiachronic);
+      }
+    }
+  }
+  return Array.from(edgeMap.entries()).map(([targetSymbol, isDiachronic]) => ({
+    targetSymbol,
+    isDiachronic,
+  }));
 }
 
 function extractReferencedSymbols(body: string): string[] {
@@ -288,6 +513,7 @@ export function recallMemories(params: {
   const idle = isIdleQuery(query);
   const bypassedSessionDedup = isExplicitReaskQuery(query);
   const literalTriggered = hasLiteralRecallTrigger(query);
+  const stanceCueActive = !idle && isStanceCue(query);
 
   const allFiles = loadStructuredMemoryFiles(memoryDir);
   // Stage 1: Active files (`有效` or `僵持待解`), excluding L0 INDEX, people symbol defs, and permanent rapport.md
@@ -320,12 +546,20 @@ export function recallMemories(params: {
     strength: number;
     isRecentMainline: boolean;
     isLinkedToActiveConcern: boolean;
+    stanceAnchored: boolean;
     sessionPenalty: number;
     fingerprint: string;
     edges: string[];
+    typedEdges: TypedMemoryEdge[];
   }
 
   const scoredMap = new Map<string, ScoredCandidate>();
+  const idfMap = idle
+    ? new Map<string, number>()
+    : computeIdfKeywordScores(
+        query,
+        candidateFiles.map((f) => ({ key: f.symbolKey, text: f.body })),
+      );
 
   for (const file of candidateFiles) {
     const meta = db.getMemoryMeta(file.frontmatter.id);
@@ -340,7 +574,7 @@ export function recallMemories(params: {
         ? cosineSimilarity(queryEmbedding, meta.embedding)
         : computeLexicalSemanticSimilarity(query, file.body);
 
-    const kw = idle ? 0 : computeKeywordScore(query, file.body);
+    const kw = idle ? 0 : (idfMap.get(file.symbolKey) ?? 0);
 
     const isMainlineCategory =
       file.frontmatter.category === "schedule" ||
@@ -356,9 +590,16 @@ export function recallMemories(params: {
     const isRecentMainline =
       (isMainlineCategory && ageHours <= 72) || isLinkedToActiveConcern;
 
+    // Wave 4.3 双门控立场锚：同时满足门控 1（用户评价+施压反问）与门控 2（住户历史表态 + 实质话题重叠 sem > 0.30 或 kw >= 0.20）
+    const stanceAnchored =
+      stanceCueActive &&
+      hasMemoryStance(file) &&
+      (sem > TOPIC_RECALL_FLOOR || kw >= 0.20);
+
     const isSessionRepeated =
       !bypassedSessionDedup &&
       !isLinkedToActiveConcern &&
+      !stanceAnchored &&
       Boolean(recentSessionRecalledIds?.has(file.frontmatter.id));
 
     const { summary } = extractBodySections(file.body);
@@ -371,9 +612,11 @@ export function recallMemories(params: {
       strength,
       isRecentMainline,
       isLinkedToActiveConcern,
+      stanceAnchored,
       sessionPenalty: isSessionRepeated ? SESSION_REPEAT_PENALTY : 1.0,
       fingerprint: normalizeContentFingerprint(summary),
       edges: extractReferencedSymbols(file.body),
+      typedEdges: extractTypedEdges(file.body),
     });
   }
 
@@ -411,18 +654,21 @@ export function recallMemories(params: {
   let bucketBHitCount = 0;
 
   if (!idle) {
-    // 2. 桶 B · 话题直命槽（保底最多 5 条，语义 > 0.30 或关键词命中，会话已注入条目乘 sessionPenalty 降权）
+    // 2. 桶 B · 话题直命槽（保底最多 5 条，语义 > 0.30 或关键词命中，立场锚给予 +0.22 加成并豁免会话去重）
     const bucketBCandidates = Array.from(scoredMap.values())
       .filter(
         (c) =>
           !selectedBucket.has(c.file.symbolKey) &&
           (c.sem > TOPIC_RECALL_FLOOR || c.kw > 0),
       )
-      .sort(
-        (a, b) =>
-          (b.sem * 0.7 + b.kw * 0.3) * b.sessionPenalty -
-          (a.sem * 0.7 + a.kw * 0.3) * a.sessionPenalty,
-      );
+      .sort((a, b) => {
+        const boostA = a.stanceAnchored ? STANCE_ANCHOR_BOOST : 0;
+        const boostB = b.stanceAnchored ? STANCE_ANCHOR_BOOST : 0;
+        return (
+          (b.sem * 0.7 + b.kw * 0.3 + boostB) * b.sessionPenalty -
+          (a.sem * 0.7 + a.kw * 0.3 + boostA) * a.sessionPenalty
+        );
+      });
 
     for (const c of bucketBCandidates) {
       if (bucketBHitCount >= 5) break;
@@ -431,39 +677,124 @@ export function recallMemories(params: {
       }
     }
 
-    // 3. 桶 C · 显式图谱顺藤摸瓜槽（顺着桶 A/B 命中文件的 [[path/symbol]] 显式边做 1 度邻居扩散，保底最多 3 条）
+    // 3. 桶 C · 显式图谱顺藤摸瓜槽（Wave 3.3：支持 2 跳安全扩散，Hop1 >= 0.30 / Hop2 >= 0.50，历时边 0.40x 阻尼，度数 >= 5 的 Hub 节点不做二跳中继）
     const seedSymbols = new Set<string>(selectedBucket.keys());
+
+    // 预计算活跃记忆图谱中每个符号的总度数（入度+出度，不含 people/*）以识别 Hub 节点
+    const neighborSets = new Map<string, Set<string>>();
+    const ensureNeighborSet = (sym: string): Set<string> => {
+      let s = neighborSets.get(sym);
+      if (!s) {
+        s = new Set<string>();
+        neighborSets.set(sym, s);
+      }
+      return s;
+    };
+    for (const [symKey, cand] of scoredMap.entries()) {
+      for (const edge of cand.typedEdges) {
+        if (edge.targetSymbol.startsWith("people/")) continue;
+        if (scoredMap.has(edge.targetSymbol) && edge.targetSymbol !== symKey) {
+          ensureNeighborSet(symKey).add(edge.targetSymbol);
+          ensureNeighborSet(edge.targetSymbol).add(symKey);
+        }
+      }
+    }
+
+    const hop1Scores = new Map<string, number>();
 
     for (const seedKey of seedSymbols) {
       const seed = scoredMap.get(seedKey);
       if (!seed) continue;
 
-      // Outgoing edges from seed -> target
-      for (const targetSym of seed.edges) {
-        const targetCand = scoredMap.get(targetSym);
-        if (targetCand) {
+      // Hop 1 Outgoing edges from seed -> target
+      for (const edge of seed.typedEdges) {
+        const targetCand = scoredMap.get(edge.targetSymbol);
+        if (!targetCand || targetCand.strength < HOP1_MIN_STRENGTH) continue;
+        const edgeWeight = edge.isDiachronic ? DIACHRONIC_EDGE_DAMPING : 1.0;
+        const s = targetCand.strength * edgeWeight * 0.85;
+        hop1Scores.set(
+          edge.targetSymbol,
+          Math.max(hop1Scores.get(edge.targetSymbol) ?? 0, s),
+        );
+        graphScores.set(
+          edge.targetSymbol,
+          Math.max(graphScores.get(edge.targetSymbol) ?? 0, s),
+        );
+      }
+
+      // Hop 1 Incoming edges: other active files referencing seed or sharing non-people entity
+      for (const [otherKey, otherCand] of scoredMap.entries()) {
+        if (otherKey === seedKey || otherCand.strength < HOP1_MIN_STRENGTH) {
+          continue;
+        }
+        const directEdgeToSeed = otherCand.typedEdges.find(
+          (e) => e.targetSymbol === seedKey,
+        );
+        const sharedEntityEdge = otherCand.typedEdges.find(
+          (e) =>
+            !e.targetSymbol.startsWith("people/") &&
+            seed.edges.includes(e.targetSymbol),
+        );
+        const matchedEdge = directEdgeToSeed ?? sharedEntityEdge;
+        if (matchedEdge) {
+          const edgeWeight = matchedEdge.isDiachronic
+            ? DIACHRONIC_EDGE_DAMPING
+            : 1.0;
+          const s = otherCand.strength * edgeWeight * 0.80;
+          hop1Scores.set(otherKey, Math.max(hop1Scores.get(otherKey) ?? 0, s));
           graphScores.set(
-            targetSym,
-            Math.max(graphScores.get(targetSym) ?? 0, targetCand.strength),
+            otherKey,
+            Math.max(graphScores.get(otherKey) ?? 0, s),
           );
         }
       }
+    }
 
-      // Incoming edges: other active files referencing the same symbol or seed
+    // Hop 2 expansion from non-Hub Hop 1 nodes (degree < HUB_DEGREE_THRESHOLD)
+    for (const [hop1Key] of hop1Scores.entries()) {
+      if (hop1Key.startsWith("people/")) continue;
+      const degree = neighborSets.get(hop1Key)?.size ?? 0;
+      if (degree >= HUB_DEGREE_THRESHOLD) {
+        // Hub avoidance: skip high-degree hub nodes as 2-hop intermediaries
+        continue;
+      }
+      const hop1Cand = scoredMap.get(hop1Key);
+      if (!hop1Cand) continue;
+
+      // Hop 2 Outgoing from hop1 -> hop2
+      for (const edge of hop1Cand.typedEdges) {
+        const hop2Sym = edge.targetSymbol;
+        if (seedSymbols.has(hop2Sym) || hop2Sym === hop1Key) continue;
+        const hop2Cand = scoredMap.get(hop2Sym);
+        if (!hop2Cand || hop2Cand.strength < HOP2_MIN_STRENGTH) continue;
+        const edgeWeight = edge.isDiachronic ? DIACHRONIC_EDGE_DAMPING : 1.0;
+        const hop2Score = hop2Cand.strength * edgeWeight * 0.55;
+        graphScores.set(
+          hop2Sym,
+          Math.max(graphScores.get(hop2Sym) ?? 0, hop2Score),
+        );
+      }
+
+      // Hop 2 Incoming to hop1
       for (const [otherKey, otherCand] of scoredMap.entries()) {
-        if (otherKey === seedKey) continue;
-        const sharesEntityOrDirectLink =
-          otherCand.edges.includes(seedKey) ||
-          otherCand.edges.some(
-            (e) => !e.startsWith("people/") && seed.edges.includes(e),
-          );
-        if (sharesEntityOrDirectLink) {
+        if (
+          seedSymbols.has(otherKey) ||
+          otherKey === hop1Key ||
+          otherCand.strength < HOP2_MIN_STRENGTH
+        ) {
+          continue;
+        }
+        const edgeToHop1 = otherCand.typedEdges.find(
+          (e) => e.targetSymbol === hop1Key,
+        );
+        if (edgeToHop1) {
+          const edgeWeight = edgeToHop1.isDiachronic
+            ? DIACHRONIC_EDGE_DAMPING
+            : 1.0;
+          const hop2Score = otherCand.strength * edgeWeight * 0.55;
           graphScores.set(
             otherKey,
-            Math.max(
-              graphScores.get(otherKey) ?? 0,
-              otherCand.strength * 0.85,
-            ),
+            Math.max(graphScores.get(otherKey) ?? 0, hop2Score),
           );
         }
       }
@@ -547,6 +878,29 @@ export function recallMemories(params: {
     (k) => scoredMap.get(k)!,
   );
 
+  // Wave 3.2: 使用三检索通道（sem / kw / graph）加权 RRF 合成检索相关性分 S_rel，并叠加 0.10*time + 0.10*strength 先验
+  const useCustomWeights = params.weights !== undefined;
+  const rrfScoreMap = computeThreeChannelRrfScores(
+    finalCandidates.map((c) => {
+      const bucket = selectedBucket.get(c.file.symbolKey)!;
+      const gScore =
+        graphScores.get(c.file.symbolKey) ??
+        (bucket === "bucket_a_mainline" ? 0.35 : 0);
+      return {
+        key: c.file.symbolKey,
+        sem: c.sem,
+        kw: c.kw,
+        graph: gScore,
+      };
+    }),
+    RRF_DEFAULT_K,
+    {
+      sem: weights.sem > 0 ? 1.0 : 0,
+      kw: weights.kw > 0 ? 1.0 : 0,
+      graph: weights.graph > 0 ? 0.8 : 0,
+    },
+  );
+
   const ranked: Array<{
     candidate: ScoredCandidate;
     item: RecalledMemoryItem;
@@ -555,13 +909,17 @@ export function recallMemories(params: {
       const bucket = selectedBucket.get(c.file.symbolKey)!;
       const gScore =
         graphScores.get(c.file.symbolKey) ??
-        (bucket === "bucket_a_mainline" ? 0.5 : 0);
-      const rawTotalScore =
-        weights.sem * c.sem +
-        weights.kw * c.kw +
-        weights.graph * gScore +
-        weights.time * c.time +
-        weights.strength * c.strength;
+        (bucket === "bucket_a_mainline" ? 0.35 : 0);
+      const rrfRel = rrfScoreMap.get(c.file.symbolKey) ?? 0;
+      const stanceBoost = c.stanceAnchored ? STANCE_ANCHOR_BOOST : 0;
+      const rawTotalScore = useCustomWeights
+        ? weights.sem * c.sem +
+          weights.kw * c.kw +
+          weights.graph * gScore +
+          weights.time * c.time +
+          weights.strength * c.strength +
+          stanceBoost
+        : 0.80 * rrfRel + 0.10 * c.time + 0.10 * c.strength + stanceBoost;
       const totalScore =
         bucket === "bucket_a_mainline"
           ? rawTotalScore
@@ -582,6 +940,7 @@ export function recallMemories(params: {
           summary,
           frontstageNarrative,
           bucket,
+          ...(c.stanceAnchored ? { stanceAnchored: true } : {}),
           score: Number(totalScore.toFixed(4)),
           scoreBreakdown: {
             sem: Number(c.sem.toFixed(4)),
@@ -657,9 +1016,11 @@ export function recallMemories(params: {
           strength: arch.strength,
           isRecentMainline: false,
           isLinkedToActiveConcern: false,
+          stanceAnchored: false,
           sessionPenalty: 1.0,
           fingerprint: fp,
           edges: [],
+          typedEdges: [],
         },
         item: {
           id: arch.file.frontmatter.id,
@@ -761,10 +1122,16 @@ export function recallMemories(params: {
         : item.date;
     const prefixTag = item.reactivatedFromArchive
       ? `[翻出的旧记忆 · ${timeTag}]`
-      : `[${timeTag}]`;
+      : item.stanceAnchored
+        ? `[我之前的立场 · ${timeTag}]`
+        : `[${timeTag}]`;
     const parts = [`- ${prefixTag} ${item.summary}`];
     if (item.frontstageNarrative) {
-      parts.push(`  我的印象：${item.frontstageNarrative}`);
+      parts.push(
+        item.stanceAnchored
+          ? `  我当时的看法：${item.frontstageNarrative}`
+          : `  我的印象：${item.frontstageNarrative}`,
+      );
     }
     if (item.hydratedQuote) {
       parts.push(`  当时原话：${item.hydratedQuote}`);

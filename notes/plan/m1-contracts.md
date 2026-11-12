@@ -93,7 +93,10 @@ export interface Clock {
 - `preHydrateQuotes(db: EchoreDatabase, sourceEventIds: Array<string | undefined | null>, now?: Date): Map<string, string>`
 - `formatEventFlowWithGapHints(records: EventLogRecord[], now: Date): string[]`（按时间序展开事件流并插入模糊时段与 `gapHint` 停顿提示）
 - `isIdleQuery(text: string): boolean` / `isExplicitReaskQuery(text: string): boolean`
-- `recallMemories(params): RecallResult`（Wave 2 升级：空档输入 `isIdleQuery` 短路只留桶 A；`recentSessionRecalledIds` 会话去重降权与点名重提豁免；同轮内容指纹去重；三层级联兜底：Stage 1 活跃 MD → Stage 2 `event_log_fts` + 当日 `journal` 热记事 → Stage 3 `status: 已沉底` 冷仓唤醒闭环）
+- `isStanceCue(query: string): boolean` / `hasMemoryStance(file: ParsedMemoryFile): boolean`（Wave 4 双门控 B 立场锚：同时满足“评价词 + 征询/反问词”与“住户历史表态 + 话题实质重叠 `sem > 0.30 || kw >= 0.20`”时，穿透会话去重并赋予 `+0.22` 立场锚加成）
+- `computeIdfKeywordScores(query: string, docs: ReadonlyArray<{ key: string; text: string }>): Map<string, number>`（Wave 3 实词 IDF 字面打分，消除长句日常词稀释罕见专名得分）
+- `computeThreeChannelRrfScores(candidates, k?: number): Map<string, number>`（Wave 3 三检索通道 `sem / kw / graph` 加权 RRF 融合，$k=60$，不含固有标量 `time / strength`）
+- `recallMemories(params): RecallResult`（Wave 2 & Wave 3 升级：空档输入 `isIdleQuery` 短路只留桶 A；`recentSessionRecalledIds` 会话去重降权与点名重提豁免；IDF 实词字面打分 + 三检索通道 RRF 与 `0.10*time + 0.10*strength` 标量先验混排；桶 C 二跳图扩散 `Hop 1 >= 0.30`、`Hop 2 >= 0.50`、历时边 `0.40x` 阻尼与总度数 $\ge 5$ Hub 节点中继抑制；三层级联兜底：Stage 1 活跃 MD → Stage 2 `event_log_fts` + 当日 `journal` 热记事 → Stage 3 `status: 已沉底` 冷仓唤醒闭环）
 
 ### 2.7 `src/llm/` 与 `src/frontstage/`、`src/loop/engine.ts`
 - `SandwichRequest`:
