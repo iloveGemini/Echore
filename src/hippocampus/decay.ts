@@ -221,7 +221,8 @@ export function reconsolidateRecalledMemories(params: {
     const baseStrength = existing?.strength ?? INITIAL_MEMORY_STRENGTH;
     let nextStrength: number;
     if (isReactivatedFromColdArchive) {
-      nextStrength = Math.max(baseStrength, REACTIVATED_ARCHIVE_STRENGTH);
+      // 冷仓唤醒按契约重置为 0.435（不取原值与 0.435 的较大值）
+      nextStrength = REACTIVATED_ARCHIVE_STRENGTH;
     } else if (isUnresolvedConcernOrNegative) {
       nextStrength = baseStrength;
     } else {

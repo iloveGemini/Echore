@@ -46,7 +46,7 @@ const DIACHRONIC_EXEMPT_PREDICATES = new Set([
 
 export const MAX_ASSERTIONS_PER_FILE = 6;
 export const MAX_STRUCTURED_BODY_CHARS = 600;
-export const MIN_ASSERTION_SEMANTIC_CHARS = 2;
+export const MIN_ASSERTION_SEMANTIC_CHARS = 4;
 
 function countSemanticChars(rawArgs: string): number {
   const withoutRefs = rawArgs

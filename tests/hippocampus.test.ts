@@ -260,10 +260,16 @@ allow_forget: false
     );
     expect(coffeeItem?.bucket).toBe("bucket_c_graph");
 
-    // Verify Pre-Hydration inlined original quote and stripped log-* IDs
+    // Verify Pre-Hydration inlined original quote with vague time only
+    // (回想只给大概：近期引文只给模糊时段，精确日期不进入前台上下文；
+    //  时段标签随本地时区而变，断言只锁“模糊时段 + 原话内容”与“无精确日期”)
     expect(recalled.formattedBlock).toContain(
-      "2026-11-09 他说：“下周二我要去杭州出差三天，顺便想去灵隐寺走走”",
+      "他说：“下周二我要去杭州出差三天，顺便想去灵隐寺走走”",
     );
+    expect(recalled.formattedBlock).toMatch(
+      /(今天|昨天|前天)(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜) 他说：“下周二我要去杭州出差三天/,
+    );
+    expect(recalled.formattedBlock).not.toContain("2026-11-09");
     expect(recalled.formattedBlock).not.toMatch(/log-\d+/);
 
     fs.rmSync(memDir, { recursive: true, force: true });

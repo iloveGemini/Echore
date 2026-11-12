@@ -6,7 +6,7 @@
 ## 1. 当前阶段与核心决议（2026-11-12）
 
 - **当前阶段**：**M1、M2、M3 与记忆进化 Wave 1–4 全部完成**；下一步进入 **F1 正式前端定稿与后端联调**。
-- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.3）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)（v2 已完成）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
+- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.4）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)（v2 已完成）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
 - **M1 / M2 / Wave 1–4 已落地交付项（摘要）**：
   - `src/core/`、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 3 昼夜睡眠新陈代谢环）。
   - **Wave 1 夜间编译止血与原子回滚护栏（2026-11-12）**：
@@ -25,7 +25,7 @@
   - **Wave 4 睡前双向原话反馈链、默契条件收窄与双门控立场锚（2026-11-12）**：
     1. **30min 时间窗双向原话反馈链 (`journal.ts` · `compiler.ts`)**：`extractFeedbackTriplets` 按相邻消息 $\le 30\text{min}$ 切分连续对话段，机械配对 `prev -> acts -> next` 原话三联包递给睡前自省与夜间编译器，防自我美化。
     2. **默契反例条件收窄 (`compiler.ts` · `schemas.ts`)**：`RapportRuleSpecSchema` 支持 `revises_rule_prefix`，就地收窄既有 `rapport.md` 默契条目并更新 `[src: log-xxx]`。
-    3. **双门控 B 立场锚 (`recall.ts`)**：同时满足门控 1（评价词 + 征询/反问词 `isStanceCue`）与门控 2（住户历史表态 `hasMemoryStance` + 实质话题重叠 `sem > 0.30 || kw >= 0.20`）时，穿透会话去重并赋予 `+0.22` 立场锚加成（`[我之前的立场]`），根治闲聊顺从改口。
+    3. **双门控 B 立场锚 (`recall.ts`)**：同时满足门控 1（评价词 + 征询/反问词 `isStanceCue`）与门控 2（住户历史表态 `hasMemoryStance` + 实质话题重叠 `sem > 0.30 || kw > 0.25`）时，穿透会话去重并赋予 `+0.22` 立场锚加成（`[我之前的立场]`），根治闲聊顺从改口。
 - **M3.1 已落地交付项（五官感知层 + 独居生活引擎）**：
   1. **四通道边际感知层 (`src/perception/`)**：`chrono-ambient.ts`（天气剧变/断联/特殊时间窗边际触发）、`desktop-probe.ts`（状态段去噪聚合 + 隐私黑名单 + 禁报进程名）、`world-feed.ts`（RSS/Atom 与 HTML 正文提取）。
   2. **独居生活引擎 (`src/frontstage/solitary.ts`)**：`runSolitaryTick` 实现 S1 `feed_roaming`、S2 `hobby_project`（`projects.yaml` 跨天目标进度树）、S3 `secret_prep`（`prep_for_user.md` + 置 `has_prep: true`），落盘 `event_log` 与 `journal/` 并将多巴胺回血至 $B_{\text{da}} + 0.12$。

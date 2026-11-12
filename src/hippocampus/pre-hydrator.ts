@@ -25,10 +25,10 @@ export function preHydrateQuotes(
     const record = db.getEventLogById(id);
     if (!record) continue;
 
-    const datePart = record.timestamp.slice(0, 10);
-    const vaguePart = now ? formatVagueWhen(record.timestamp, now) : datePart;
-    const timePrefix =
-      vaguePart !== datePart ? `${vaguePart} · ${datePart}` : datePart;
+    // 回想只给大概：有 now 就只给模糊时间，不并列精确日期（与 recall.ts 的渲染规则一致）
+    const timePrefix = now
+      ? formatVagueWhen(record.timestamp, now)
+      : record.timestamp.slice(0, 10);
     const speakerLabel =
       record.role === "user"
         ? "他说"

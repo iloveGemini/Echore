@@ -76,7 +76,7 @@ export const STANCE_ANCHOR_BOOST = 0.22;
 const STANCE_OPINION_RE =
   /觉得|认为|看法|喜欢|讨厌|烦|无聊|没(?:什么)?意思|好看|难看|故弄玄虚|烂|吹过头|蠢|没劲|过誉|矫情/;
 const STANCE_PRESSURE_RE =
-  /对吧|是不是|对不对|你说呢|怎么看|肯定也|你也|算了吧|吧[？?~～!！。]*$|呢[？?~～!！。]*$|吗[？?~～!！。]*$/;
+  /对吧|是不是|对不对|你说呢|怎么看|肯定也|算了吧|吧[？?~～!！。]*$|呢[？?~～!！。]*$|吗[？?~～!！。]*$/;
 const RESIDENT_STANCE_RE =
   /我觉得|我认为|我喜欢|我讨厌|我不喜欢|我最喜欢|我最讨厌|我不信|我反而|我不同意|在我看来|我宁可|我偏|我倒觉得|我向来|我才不/;
 const SELF_STANCE_PREDICATE_RE =
@@ -590,11 +590,11 @@ export function recallMemories(params: {
     const isRecentMainline =
       (isMainlineCategory && ageHours <= 72) || isLinkedToActiveConcern;
 
-    // Wave 4.3 双门控立场锚：同时满足门控 1（用户评价+施压反问）与门控 2（住户历史表态 + 实质话题重叠 sem > 0.30 或 kw >= 0.20）
+    // Wave 4.3 双门控立场锚：同时满足门控 1（用户评价+施压反问）与门控 2（住户历史表态 + 实质话题重叠 sem > 0.30 或 kw > 0.25）
     const stanceAnchored =
       stanceCueActive &&
       hasMemoryStance(file) &&
-      (sem > TOPIC_RECALL_FLOOR || kw >= 0.20);
+      (sem > TOPIC_RECALL_FLOOR || kw > 0.25);
 
     const isSessionRepeated =
       !bypassedSessionDedup &&
@@ -740,7 +740,7 @@ export function recallMemories(params: {
           const edgeWeight = matchedEdge.isDiachronic
             ? DIACHRONIC_EDGE_DAMPING
             : 1.0;
-          const s = otherCand.strength * edgeWeight * 0.80;
+          const s = otherCand.strength * edgeWeight * 0.85;
           hop1Scores.set(otherKey, Math.max(hop1Scores.get(otherKey) ?? 0, s));
           graphScores.set(
             otherKey,
@@ -1086,9 +1086,7 @@ export function recallMemories(params: {
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 120);
-      const vague = formatVagueWhen(ev.timestamp, now);
-      const dateStr = ev.timestamp.slice(0, 10);
-      const timeLabel = vague !== dateStr ? `${vague} · ${dateStr}` : dateStr;
+      const timeLabel = formatVagueWhen(ev.timestamp, now);
       const speaker = ev.role === "user" ? "他说" : "我当时说";
       rawEventSnippets.push(
         `- [当时原话线索 · ${timeLabel}] ${speaker}：“${clean}”`,
@@ -1116,10 +1114,9 @@ export function recallMemories(params: {
   }
 
   const formattedLines = items.map((item) => {
-    const timeTag =
-      item.vagueWhen && item.vagueWhen !== item.date
-        ? `${item.vagueWhen} · ${item.date}`
-        : item.date;
+    // 回想只给大概：前台上下文只出现模糊时间，不并列精确日期。
+    // 模型不会自己换算时间——上下文里一旦出现精确日期，它就会原样引用，监控感就回来了。
+    const timeTag = item.vagueWhen ?? item.date;
     const prefixTag = item.reactivatedFromArchive
       ? `[翻出的旧记忆 · ${timeTag}]`
       : item.stanceAnchored

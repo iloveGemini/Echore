@@ -866,8 +866,8 @@ export async function runNightlyCompiler(
       const isExplicitlySuperseded = explicitSupersedeIds.has(
         owner.frontmatter.id,
       );
+      // 客观短期状态品类（health / schedule）的同槽位状态更新按品类放行，不再限定谓词必须是“当前状态”
       const isTransientStateEvolution =
-        predName === "当前状态" &&
         (spec.category === "health" || spec.category === "schedule") &&
         (owner.frontmatter.category === "health" ||
           owner.frontmatter.category === "schedule");
@@ -887,12 +887,12 @@ export async function runNightlyCompiler(
       const reason: SlotConflictReason = ownerProtected
         ? "protected_nail_memory"
         : "unconfirmed_preference_or_event_collision";
+      // 同一对新旧文件只记一条待复核（显式 supersedes 循环可能已记过同一对，槽位不同也合并）
       if (
         !pendingConflicts.some(
           (c) =>
             c.existingId === owner.frontmatter.id &&
-            c.incomingId === spec.id &&
-            c.slotKey === slotKey,
+            c.incomingId === spec.id,
         )
       ) {
         pendingConflicts.push({
