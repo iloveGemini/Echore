@@ -16,6 +16,7 @@ import type { RecalledMemoryItem } from "./recall.ts";
 export const INITIAL_MEMORY_STRENGTH = 0.75;
 export const NAIL_MEMORY_STRENGTH = 0.90;
 export const ARCHIVAL_STRENGTH_THRESHOLD = 0.12;
+export const REACTIVATED_ARCHIVE_STRENGTH = 0.435;
 export const RECONSOLIDATION_BOOST = 0.05;
 
 /**
@@ -157,20 +158,29 @@ export function syncMemoryMetaFromFiles(params: {
 }
 
 /**
- * §4.3 再巩固正反馈（区分“事实确信”与“负面防反刍”）
- * 1. 事实与正向偏好记忆：被 recall 且非负向冲突回合时，重置 last_accessed、access_count += 1，且 strength = min(1.0, strength + 0.05)
- * 2. 负面事件与未落定牵挂注：被 recall 时只更新 access_count 与 last_accessed，绝不上调 strength
+ * §4.3 & Wave 2 再巩固正反馈与冷仓重激活（区分“事实确信”、“负面防反刍”、“空档防刷分”与“已沉底唤醒”）
+ * 1. 空档输入（isIdleQuery: true）：直接短路返回，不累加 access_count 也不加 +0.05
+ * 2. 已沉底冷仓唤醒（reactivatedFromArchive / status === '已沉底'）：将文件 YAML 与 SQLite status 恢复为 `有效`，强度回血至 0.435
+ * 3. 事实与正向偏好记忆：被 recall 且非负向冲突回合时，重置 last_accessed、access_count += 1，且 strength = min(1.0, strength + 0.05)
+ * 4. 负面事件与未落定牵挂注：被 recall 时只更新 access_count 与 last_accessed，绝不上调 strength
  */
 export function reconsolidateRecalledMemories(params: {
   db: EchoreDatabase;
   memoryDir?: string;
   recalledItems: RecalledMemoryItem[];
   isNegativeOrConflictTurn: boolean;
+  isIdleQuery?: boolean;
   now: Date;
 }): void {
-  const { db, memoryDir, recalledItems, isNegativeOrConflictTurn, now } =
-    params;
-  if (recalledItems.length === 0) return;
+  const {
+    db,
+    memoryDir,
+    recalledItems,
+    isNegativeOrConflictTurn,
+    isIdleQuery = false,
+    now,
+  } = params;
+  if (isIdleQuery || recalledItems.length === 0) return;
 
   const fileById = new Map<string, ParsedMemoryFile>();
   if (memoryDir) {
@@ -196,6 +206,12 @@ export function reconsolidateRecalledMemories(params: {
       activeConcernIds.has(item.id) ||
       (srcEventId !== undefined && activeConcernSourceIds.has(srcEventId));
 
+    const isReactivatedFromColdArchive =
+      Boolean(item.reactivatedFromArchive) ||
+      item.status === "已沉底" ||
+      existing?.status === "已沉底" ||
+      parsedFile?.frontmatter.status === "已沉底";
+
     const isUnresolvedConcernOrNegative =
       isNegativeOrConflictTurn ||
       isLinkedToActiveConcern ||
@@ -203,15 +219,44 @@ export function reconsolidateRecalledMemories(params: {
       item.status === "僵持待解";
 
     const baseStrength = existing?.strength ?? INITIAL_MEMORY_STRENGTH;
-    const nextStrength = isUnresolvedConcernOrNegative
-      ? baseStrength
-      : Math.min(1.0, Number((baseStrength + RECONSOLIDATION_BOOST).toFixed(6)));
+    let nextStrength: number;
+    if (isReactivatedFromColdArchive) {
+      nextStrength = Math.max(baseStrength, REACTIVATED_ARCHIVE_STRENGTH);
+    } else if (isUnresolvedConcernOrNegative) {
+      nextStrength = baseStrength;
+    } else {
+      nextStrength = Math.min(
+        1.0,
+        Number((baseStrength + RECONSOLIDATION_BOOST).toFixed(6)),
+      );
+    }
+
+    const nextStatus = isReactivatedFromColdArchive
+      ? "有效"
+      : (existing?.status ?? item.status);
+
+    if (
+      isReactivatedFromColdArchive &&
+      memoryDir &&
+      parsedFile &&
+      parsedFile.frontmatter.status === "已沉底"
+    ) {
+      const absPath = path.join(memoryDir, parsedFile.relPath);
+      writeUpdatedFrontmatter(
+        absPath,
+        {
+          ...parsedFile.frontmatter,
+          status: "有效",
+        },
+        parsedFile.body,
+      );
+    }
 
     const updatedMeta: MemoryMetaRecord = {
       id: item.id,
       path: existing?.path ?? item.relPath,
       category: existing?.category ?? item.category,
-      status: existing?.status ?? item.status,
+      status: nextStatus,
       allow_forget: existing?.allow_forget ?? true,
       strength: nextStrength,
       access_count: (existing?.access_count ?? 0) + 1,

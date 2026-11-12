@@ -1,14 +1,23 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-11（补全 `web/app.js` 内部算法联调与性格测试台前端事件绑定及 HTTP/SSE 全接口对接逻辑，验证 36/36 测试全绿）。
+> 最后更新：2026-11-12（完成记忆系统进化 **Wave 1（止血与夜间原子回滚）** 与 **Wave 2（空档短路、会话去重、三层级联冷仓唤醒与时间体感）** 落地，验证 39/39 测试全绿）。
 
-## 1. 当前阶段与核心决议（2026-11-11）
+## 1. 当前阶段与核心决议（2026-11-12）
 
-- **当前阶段**：**M1、M2、M3 全部完成**，已交付 **前端对话间三风格交互原型 Demo (`notes/design/demos/index.html`)** 与 **内部算法联调及性格测试台 (`web/`)**，下一步进入 **F1 正式前端界面定稿与后端联调**。
-- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.3）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
-- **M1 / M2 已落地交付项（摘要）**：
+- **当前阶段**：**M1、M2、M3 全部完成**，**后端记忆进化 Wave 1 & Wave 2 已落地**；下一步推进 **Wave 3（召回回放评测集、IDF 实词打分、三通道 RRF 融合与二跳图谱）** 或 **F1 正式前端定稿**。
+- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.3）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)（v2）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
+- **M1 / M2 / Wave 1–2 已落地交付项（摘要）**：
   - `src/core/`、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 3 昼夜睡眠新陈代谢环）。
+  - **Wave 1 夜间编译止血与原子回滚护栏（2026-11-12）**：
+    1. **Z 式冲突待复核门 (`src/hippocampus/compiler.ts`)**：保护 `allow_forget: false` 钉子记忆与 `people/*` 定义档；对未显式声明 `supersedes` 的 `preference / life_event / chat` 槽位碰撞，保留旧文件为 `有效`，将新断言降级为 `情境表态(...)` 并记入 `pendingConflicts`。
+    2. **L7 记忆颗粒度机检 (`src/hippocampus/linter.ts`)**：拦截单文件断言过载（`> 6` 条，`too_coarse`）、正文超长（`> 600` 字符，`too_coarse`）与空洞/未格式化断言（`needs_rewrite`）。
+    3. **睡眠环原子回滚 (`src/loop/engine.ts` · `runSleepCycle()`)**：写操作前记录 `memoryDir` 文件快照与 SQLite 备份；若 L1–L7 机检未通过或抛错，100% 还原磁盘 `.md` 文件与 SQLite 状态表。
+  - **Wave 2 召回卫生、三层级联冷仓唤醒与时间体感（2026-11-12）**：
+    1. **空档输入短路与防刷分 (`recall.ts` · `decay.ts`)**：`isIdleQuery` 识别纯语气/应答词（“嗯/好的/哈哈”），短路跳过桶 B/C 与 `reconsolidateRecalledMemories` 加分。
+    2. **会话去重与点名重提豁免 (`recall.ts` · `engine.ts`)**：维护本会话 2h 内已注入记忆滑窗施加 `0.40x` 降权，命中 `isExplicitReaskQuery`（“刚才说的再讲一遍”或带引号专名）自动豁免。
+    3. **三层级联兜底与冷仓唤醒闭环 (`recall.ts` · `decay.ts`)**：Stage 1 活跃 MD → Stage 2 `event_log_fts` + 当日 `journal` 热记事（`[当时原话线索]`）→ Stage 3 显式追问旧茬时唤醒 `status: 已沉底` 冷归档并在再巩固时恢复为 `有效`、强度回血至 `0.435`。
+    4. **模糊时间感与停顿体感 (`clock.ts` · `pre-hydrator.ts`)**：落地 `formatVagueWhen`（今天 8 时段 / 昨前天+时段 / 7 天内星期+时段 / 更早日期）与 `formatGapHint`（过了一会儿 / 半个多小时 / 隔了约 N 小时或天）。
 - **M3.1 已落地交付项（五官感知层 + 独居生活引擎）**：
   1. **四通道边际感知层 (`src/perception/`)**：`chrono-ambient.ts`（天气剧变/断联/特殊时间窗边际触发）、`desktop-probe.ts`（状态段去噪聚合 + 隐私黑名单 + 禁报进程名）、`world-feed.ts`（RSS/Atom 与 HTML 正文提取）。
   2. **独居生活引擎 (`src/frontstage/solitary.ts`)**：`runSolitaryTick` 实现 S1 `feed_roaming`、S2 `hobby_project`（`projects.yaml` 跨天目标进度树）、S3 `secret_prep`（`prep_for_user.md` + 置 `has_prep: true`），落盘 `event_log` 与 `journal/` 并将多巴胺回血至 $B_{\text{da}} + 0.12$。
@@ -33,12 +42,15 @@
 5. **M3.2：【环 2：自主心跳环】与三环咬合（✅ 已完成，2026-11-10）**
 6. **M3.3：MCP 出差外壳 + 时间快进仿真台（✅ 已完成，2026-11-10）**
 7. **M3.4：主场模式极薄 HTTP + SSE 服务层（✅ 已完成，2026-11-10）**
+8. **记忆进化 Wave 1：Z 式防误取代 + L7 颗粒度机检 + 睡眠环原子回滚（✅ 已完成，2026-11-12）**
+9. **记忆进化 Wave 2：空档短路 + 会话去重 + 三层级联冷仓唤醒 + 时间体感（✅ 已完成，2026-11-12）**
+10. **记忆进化 Wave 3–4（待推进）**：召回回放评测集与 IDF/RRF/二跳图谱（Wave 3）· 睡前双向原话反馈链与双门控立场锚（Wave 4）——详见 [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)。
 
 ---
 
-## 3. 验证结果与运行备忘（2026-11-11）
+## 3. 验证结果与运行备忘（2026-11-12）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **9 个测试文件、36/36 项测试（314 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **9 个测试文件、39/39 项测试（365 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
 - **已知问题**：无阻塞问题；后端三环引擎与 HTTP/SSE 服务层均已就绪，可进入前端设计。

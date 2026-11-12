@@ -8,7 +8,7 @@ import {
   MemoryFrontmatterSchema,
 } from "../core/schemas.ts";
 
-export type LintRuleId = "L1" | "L2" | "L3" | "L4" | "L5" | "L6";
+export type LintRuleId = "L1" | "L2" | "L3" | "L4" | "L5" | "L6" | "L7";
 
 export interface LintIssue {
   rule: LintRuleId;
@@ -41,7 +41,20 @@ const DIACHRONIC_EXEMPT_PREDICATES = new Set([
   "结转",
   "依据",
   "曾用状态",
+  "情境表态",
 ]);
+
+export const MAX_ASSERTIONS_PER_FILE = 6;
+export const MAX_STRUCTURED_BODY_CHARS = 600;
+export const MIN_ASSERTION_SEMANTIC_CHARS = 2;
+
+function countSemanticChars(rawArgs: string): number {
+  const withoutRefs = rawArgs
+    .replace(/\[\[[^\]]+\]\]/g, " ")
+    .replace(/\[src:\s*[^\]]+\]/gi, " ")
+    .replace(/[\p{P}\p{S}\s]+/gu, "");
+  return Array.from(withoutRefs).length;
+}
 
 function walkMarkdownFiles(baseDir: string, subDir = ""): string[] {
   const target = path.join(baseDir, subDir);
@@ -137,16 +150,58 @@ export function runMemoryLinter(params: {
     }
 
     // Parse predicate lines in body: - 谓词(参数...)
+    const isGranularityCheckedFile =
+      relPath !== "INDEX.md" && relPath !== "implicit/rapport.md";
+    let assertionBulletCount = 0;
+
+    if (
+      isGranularityCheckedFile &&
+      body.trim().length > MAX_STRUCTURED_BODY_CHARS
+    ) {
+      issues.push({
+        rule: "L7",
+        file: relPath,
+        message: `L7 Error: [${frontmatter.id}] 正文长度 ${body.trim().length} 字符超过 ${MAX_STRUCTURED_BODY_CHARS} 字上限（too_coarse），请提炼为原子记忆`,
+      });
+    }
+
     const lines = body.split(/\r?\n/);
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed.startsWith("- ")) continue;
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(">")) {
+        continue;
+      }
 
-      const predMatch = trimmed.match(/^-\s*([^\s(（]+)\s*\((.+)\)\s*(?:\[src:\s*([^\]]+)\])?$/);
-      if (!predMatch) continue;
+      const isBullet = trimmed.startsWith("- ");
+      const predMatch = trimmed.match(
+        /^(?:-\s*)?([^\s(（#>-]+)\s*\((.+)\)\s*(?:\[src:\s*([^\]]+)\])?$/,
+      );
+      if (!predMatch) {
+        if (isBullet && isGranularityCheckedFile) {
+          assertionBulletCount += 1;
+          issues.push({
+            rule: "L7",
+            file: relPath,
+            message: `L7 Error: [${frontmatter.id}] 断言行未遵循“谓词(参数)”格式（needs_rewrite）: "${trimmed}"`,
+          });
+        }
+        continue;
+      }
 
+      assertionBulletCount += 1;
       const predicateName = predMatch[1]!;
       const argsRaw = predMatch[2]!;
+
+      if (
+        isGranularityCheckedFile &&
+        countSemanticChars(argsRaw) < MIN_ASSERTION_SEMANTIC_CHARS
+      ) {
+        issues.push({
+          rule: "L7",
+          file: relPath,
+          message: `L7 Error: [${frontmatter.id}] 断言参数内容过短空洞（needs_rewrite）: "${trimmed}"`,
+        });
+      }
 
       // L2: 共时失效状态引用拦截（除历时溯源豁免谓词外，所有共时谓词均不得指向已取代/已沉底文件）
       if (isActiveFile && !DIACHRONIC_EXEMPT_PREDICATES.has(predicateName)) {
@@ -196,6 +251,22 @@ export function runMemoryLinter(params: {
             synchronicSlotValues.set(slotKey, existing);
           }
         }
+      }
+    }
+
+    if (isGranularityCheckedFile) {
+      if (assertionBulletCount === 0) {
+        issues.push({
+          rule: "L7",
+          file: relPath,
+          message: `L7 Error: [${frontmatter.id}] 缺失任何结构化断言行（needs_rewrite）`,
+        });
+      } else if (assertionBulletCount > MAX_ASSERTIONS_PER_FILE) {
+        issues.push({
+          rule: "L7",
+          file: relPath,
+          message: `L7 Error: [${frontmatter.id}] 单文件包含 ${assertionBulletCount} 条断言（超过 ${MAX_ASSERTIONS_PER_FILE} 条上限，too_coarse），请按独立事件拆分`,
+        });
       }
     }
 

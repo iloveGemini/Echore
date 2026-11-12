@@ -42,6 +42,8 @@ export interface Clock {
   setNow(target: Date | string | number): void;
 }
 ```
+- `formatVagueWhen(eventIsoOrDate: Date | string, now: Date): string`（Wave 2 回想时刻自然粗化：今天按自然日 8 时段返回 `今天凌晨/早上/上午/中午/下午/傍晚/晚上/深夜`，昨/前天返回 `昨天深夜` 等，7 天内返回 `MM-DD（周X）时段`，更早返回 `YYYY-MM-DD`）
+- `formatGapHint(deltaMs: number): string | null`（Wave 2 相邻事件停顿体感：`< 10m` 返回 `null`、`10–30m` 返回 `（过了一会儿）`、`30–60m` 返回 `（过了半个多小时）`、`>= 60m` 返回 `（隔了约 N 小时）`、`>= 24h` 返回 `（隔了约 N 天）`）
 
 ### 2.2 `src/core/schemas.ts`
 - `ArchetypeIdSchema`: `'dog_sunny' | 'cat_aloof' | 'cool_detached' | 'clingy_sensitive' | 'steady_anchor'`
@@ -87,9 +89,11 @@ export interface Clock {
 - `buildSubconsciousHandover(params: BuildHandoverParams): SubconsciousHandover`
 
 ### 2.6 `src/hippocampus/`
-- `runMemoryLinter({ memoryDir, db, now }): LintReport`（覆盖 L1–L6）
-- `preHydrateQuotes(db: EchoreDatabase, sourceEventIds: Array<string | undefined | null>): Map<string, string>`
-- `recallMemories(params): RecallResult`（桶 A/B/C 保底 + 未满 `topK` 补位 + 五路混排 + Top 3 预水合）
+- `runMemoryLinter({ memoryDir, db, now }): LintReport`（覆盖 L1–L7）
+- `preHydrateQuotes(db: EchoreDatabase, sourceEventIds: Array<string | undefined | null>, now?: Date): Map<string, string>`
+- `formatEventFlowWithGapHints(records: EventLogRecord[], now: Date): string[]`（按时间序展开事件流并插入模糊时段与 `gapHint` 停顿提示）
+- `isIdleQuery(text: string): boolean` / `isExplicitReaskQuery(text: string): boolean`
+- `recallMemories(params): RecallResult`（Wave 2 升级：空档输入 `isIdleQuery` 短路只留桶 A；`recentSessionRecalledIds` 会话去重降权与点名重提豁免；同轮内容指纹去重；三层级联兜底：Stage 1 活跃 MD → Stage 2 `event_log_fts` + 当日 `journal` 热记事 → Stage 3 `status: 已沉底` 冷仓唤醒闭环）
 
 ### 2.7 `src/llm/` 与 `src/frontstage/`、`src/loop/engine.ts`
 - `SandwichRequest`:

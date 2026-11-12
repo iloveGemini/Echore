@@ -86,13 +86,39 @@ M2 聚焦跑通 **【环 3：昼夜新陈代谢环 Circadian Sleep Loop】** 及
 
 ### 2.4 `src/hippocampus/compiler.ts`
 - `syncMemoryMetaFromFiles(params: { memoryDir: string; db: EchoreDatabase; now: Date }): void`
-- `runNightlyCompiler(params: { memoryDir: string; db: EchoreDatabase; router?: OrganModelRouter; now: Date; dateStr: string; verdict: EndocrineNightVerdict; coldReflection: string; planOverride?: CompilationPlan }): Promise<NightlyCompileResult>`
+- `PendingSlotConflict`:
+  ```ts
+  {
+    slotKey: string;
+    existingId: string;
+    existingFile: string;
+    incomingId: string;
+    incomingFile: string;
+    incomingValue: string;
+    reason: "protected_nail_memory" | "unconfirmed_preference_or_event_collision";
+  }
+  ```
+- `runNightlyCompiler(params: { memoryDir: string; db: EchoreDatabase; router?: OrganModelRouter; now: Date; dateStr: string; verdict: EndocrineNightVerdict; coldReflection: string; planOverride?: CompilationPlan; allowSupersedeProtected?: boolean }): Promise<NightlyCompileResult>`
+  - **Z 式冲突待复核门（Wave 1 止血护栏）**：
+    - 仅当新记忆显式指定 `supersedes` 或属于客观短期状态流转（`category: "health" | "schedule"` 且谓词为 `当前状态`）且旧文件非受保护身份/偏好钉子记忆时，才自动将同槽位旧文件翻为 `status: 已取代`；
+    - 若撞上受保护钉子记忆（`allow_forget: false` 且非短期 `health/schedule` 状态流转，或 `people/*` 符号定义），或 `preference / life_event / chat` 未显式声明 `supersedes` 发生同槽位值冲突：旧文件保持 `有效` 不动，新文件中的冲突断言自动降级为历时/情境豁免谓词 `情境表态([[subject]]#slot, ...)`，并记入 `NightlyCompileResult.pendingConflicts`。
 
 ### 2.5 `src/hippocampus/decay.ts`
 - `CATEGORY_HALF_LIFE_DAYS`: `Record<MemoryCategory, number>` (`chat: 7, schedule: 14, solitary: 14, life_event: 30, health: 30, preference: 90`)
+- `REACTIVATED_ARCHIVE_STRENGTH`: `0.435` (`(INITIAL_MEMORY_STRENGTH + ARCHIVAL_STRENGTH_THRESHOLD) / 2`)
 - `computeDailyRetention(category: MemoryCategory, accessCount: number): number`
-- `reconsolidateRecalledMemories(params: { db: EchoreDatabase; memoryDir: string; recalledItems: RecalledMemoryItem[]; isNegativeOrConflictTurn: boolean; now: Date }): void`
+- `reconsolidateRecalledMemories(params: { db: EchoreDatabase; memoryDir?: string; recalledItems: RecalledMemoryItem[]; isNegativeOrConflictTurn: boolean; isIdleQuery?: boolean; now: Date }): void`
+  - **Wave 2 空档防刷分**：`isIdleQuery === true` 时直接短路返回，不累加 `access_count` 也不加 `+0.05`；
+  - **Wave 2 冷仓重激活闭环**：当被召回条目处于 `status: 已沉底`（或 `reactivatedFromArchive === true`）时，自动将其磁盘 YAML 与 SQLite `memory_meta` 的 `status` 恢复为 `有效`，并将强度回血至 `Math.max(existing.strength, 0.435)`。
 - `runDailyMemoryDecayAndArchive(params: { memoryDir: string; db: EchoreDatabase; now: Date }): DecayArchiveReport`
 
-### 2.6 `src/loop/engine.ts`
+### 2.6 `src/hippocampus/linter.ts`
+- `LintRuleId`: `'L1' | 'L2' | 'L3' | 'L4' | 'L5' | 'L6' | 'L7'`
+- **L7（记忆颗粒度机检 · Wave 1）**：对 `events/`、`concerns/`、`people/` 结构化文件检查：
+  - 单文件 `## 断言` 条目数 `> 6` 条报 `too_coarse`；
+  - 单文件正文 `body.length > 600` 字符报 `too_coarse`；
+  - 缺失合法谓词断言或单条断言剥离符号后有效语义字数 `< 2` 报 `needs_rewrite`。
+
+### 2.7 `src/loop/engine.ts`
 - `EchoreEngine.runSleepCycle(options?: SleepCycleOptions): Promise<SleepCycleOutput>`
+  - **睡眠环原子回滚护栏（Wave 1）**：进入 Step 1–4 写操作前记录 `memoryDir` 文件快照与 SQLite（`hormone_state`、`concerns`、`memory_meta`）睡前检查点；若任意步骤抛错或最终 `L1–L7` Linter 未通过，100% 还原磁盘 `.md` 文件（含清理新增脏文件）与 SQLite 状态表后再抛出异常。

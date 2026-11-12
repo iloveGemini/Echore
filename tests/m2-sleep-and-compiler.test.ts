@@ -896,4 +896,271 @@ allow_forget: false
     fs.rmSync(memDir, { recursive: true, force: true });
     db.close();
   });
+
+  test("7. Wave 1 Z-style Conflict Audit Gate: prevents silent overwrite on unconfirmed preference collisions and protects allow_forget=false nail memories", async () => {
+    const clock = new VirtualClock("2026-11-12T23:00:00");
+    const db = new EchoreDatabase({ dbPath: ":memory:", clock });
+    const memDir = createTempMemoryRepo();
+
+    const logOrig = db.appendEventLog({
+      id: "log-20261101-1000-001",
+      timestamp: "2026-11-01T10:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "我平时最喜欢喝冰美式，而且我对花生严重过敏一口都不能碰",
+    });
+    const logTonight = db.appendEventLog({
+      id: "log-20261112-2100-002",
+      timestamp: "2026-11-12T21:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "今晚降温太冷了，难得想喝一杯热可可；至于花生糖，开玩笑说看着挺香",
+    });
+
+    // 1. Existing preference memory (allow_forget: true)
+    fs.writeFileSync(
+      path.join(memDir, "events", "2026-11-01-coffee-pref.md"),
+      `---
+id: evt-coffee-pref
+type: 事件记录
+date: 2026-11-01
+status: 有效
+source_event_id: ${logOrig.id}
+category: preference
+allow_forget: true
+---
+
+## 断言
+- 偏好([[people/user]]#日常饮品, 最喜欢喝冰美式)
+
+## 前台原叙
+> 他说平时最爱喝冰美式。
+`,
+      "utf8",
+    );
+
+    // 2. Existing protected nail memory (allow_forget: false, category: preference)
+    fs.writeFileSync(
+      path.join(memDir, "events", "2026-11-01-peanut-nail.md"),
+      `---
+id: evt-peanut-nail
+type: 事件记录
+date: 2026-11-01
+status: 有效
+source_event_id: ${logOrig.id}
+category: preference
+allow_forget: false
+---
+
+## 断言
+- 偏好([[people/user]]#饮食禁忌, 对花生严重过敏绝对不碰)
+
+## 前台原叙
+> 他反复强调对花生严重过敏，这是底线不能忘。
+`,
+      "utf8",
+    );
+
+    const compileRes = await runNightlyCompiler({
+      memoryDir: memDir,
+      db,
+      now: clock.now(),
+      dateStr: "2026-11-12",
+      verdict: {
+        date: "2026-11-12",
+        items: [],
+        hormone_bounds_after: { floor_cort: 0.15, cap_ox: 1.0 },
+      },
+      coldReflection: "今晚天冷他难得喝了热可可，还指着花生糖开了句玩笑。",
+      planOverride: {
+        memories: [
+          {
+            // Case A: Unconfirmed preference collision on [[people/user]]#日常饮品 (no supersedes)
+            rel_path: "events/2026-11-12-hot-cocoa.md",
+            id: "evt-hot-cocoa",
+            type: "事件记录",
+            date: "2026-11-12",
+            status: "有效",
+            source_event_id: logTonight.id,
+            category: "preference",
+            allow_forget: true,
+            assertions: ["偏好([[people/user]]#日常饮品, 天冷想喝热可可)"],
+          },
+          {
+            // Case B: Hallucinated supersedes against a protected nail memory (`allow_forget: false`)
+            rel_path: "events/2026-11-12-peanut-joke.md",
+            id: "evt-peanut-joke",
+            type: "事件记录",
+            date: "2026-11-12",
+            status: "有效",
+            supersedes: "evt-peanut-nail",
+            source_event_id: logTonight.id,
+            category: "preference",
+            allow_forget: true,
+            assertions: ["偏好([[people/user]]#饮食禁忌, 觉得花生糖看着挺香)"],
+          },
+        ],
+        rapport_rules: [],
+      },
+    });
+
+    // Neither existing file may be flipped to 已取代!
+    expect(compileRes.supersededIds).toEqual([]);
+    expect(
+      matter(
+        fs.readFileSync(
+          path.join(memDir, "events", "2026-11-01-coffee-pref.md"),
+          "utf8",
+        ),
+      ).data.status,
+    ).toBe("有效");
+    expect(
+      matter(
+        fs.readFileSync(
+          path.join(memDir, "events", "2026-11-01-peanut-nail.md"),
+          "utf8",
+        ),
+      ).data.status,
+    ).toBe("有效");
+
+    // Both collisions are recorded in pendingConflicts and downgraded to `情境表态(...)`
+    expect(compileRes.pendingConflicts.length).toBeGreaterThanOrEqual(2);
+    expect(
+      compileRes.pendingConflicts.some(
+        (c) =>
+          c.existingId === "evt-coffee-pref" &&
+          c.reason === "unconfirmed_preference_or_event_collision",
+      ),
+    ).toBe(true);
+    expect(
+      compileRes.pendingConflicts.some(
+        (c) =>
+          c.existingId === "evt-peanut-nail" &&
+          c.reason === "protected_nail_memory",
+      ),
+    ).toBe(true);
+
+    const cocoaContent = fs.readFileSync(
+      path.join(memDir, "events", "2026-11-12-hot-cocoa.md"),
+      "utf8",
+    );
+    expect(cocoaContent).toContain(
+      "- 情境表态([[people/user]]#日常饮品, 天冷想喝热可可)",
+    );
+
+    // L1~L7 linter passes cleanly because `情境表态` does not cause an L4 synchronic conflict
+    expect(compileRes.lintReport.passed).toBe(true);
+
+    fs.rmSync(memDir, { recursive: true, force: true });
+    db.close();
+  });
+
+  test("8. Wave 1 L7 Atom Granularity Linter & Sleep Cycle Atomic Rollback: restores disk .md files and SQLite tables on L7 failure", async () => {
+    const clock = new VirtualClock("2026-11-12T23:45:00");
+    const db = new EchoreDatabase({ dbPath: ":memory:", clock });
+    const memDir = createTempMemoryRepo();
+
+    const log1 = db.appendEventLog({
+      id: "log-20261101-1200-001",
+      timestamp: "2026-11-01T12:00:00.000Z",
+      role: "user",
+      speaker: "user",
+      content: "这几天脖子有点酸",
+    });
+
+    // Seed an active T1 concern that is 11 days old (Step 2 of sleep cycle will mutate it to `已淡化` in SQLite!)
+    db.upsertConcern({
+      id: "con-neck-sore",
+      tier: "minor_worry",
+      status: "有效",
+      summary: "惦记他脖子酸",
+      source_event_id: log1.id,
+      created_at: "2026-11-01T12:00:00.000Z",
+      updated_at: "2026-11-01T12:00:00.000Z",
+      floor_cort: 0,
+      cap_ox: 1.0,
+      has_prep: false,
+    });
+
+    const mockProvider: LLMProvider = {
+      providerName: "mock",
+      async generate(): Promise<LLMResponse> {
+        return { text: "今晚很安静。", toolCalls: [], stopReason: "end_turn" };
+      },
+      async generateSandwich(): Promise<LLMResponse> {
+        return { text: "嗯。", toolCalls: [], stopReason: "end_turn" };
+      },
+    };
+    const router = new OrganModelRouter({
+      frontstage: { provider: mockProvider, model: "claude-opus-5-5" },
+      endocrine: { provider: mockProvider, model: "claude-haiku-5-5" },
+      compiler: { provider: mockProvider, model: "claude-opus-5-5" },
+      worker: { provider: mockProvider, model: "claude-sonnet-5-5" },
+    });
+
+    const engine = new EchoreEngine({
+      clock,
+      db,
+      memoryDir: memDir,
+      persona: { name: "阿狸", archetype: "cat_aloof", chronotype: "regular" },
+      router,
+    });
+
+    // Attempt sleep cycle with an overloaded 7-assertion file (violates L7 > 6 assertions cap)
+    let caughtError: Error | null = null;
+    try {
+      await engine.runSleepCycle({
+        overrideReflectionText: "今晚帮他理了理杂事。",
+        compilationPlanOverride: {
+          memories: [
+            {
+              rel_path: "events/2026-11-12-overloaded-dump.md",
+              id: "evt-overloaded-dump",
+              type: "事件记录",
+              date: "2026-11-12",
+              status: "有效",
+              source_event_id: log1.id,
+              category: "chat",
+              allow_forget: true,
+              assertions: [
+                "日常([[people/user]], 第一件琐事记录)",
+                "日常([[people/user]], 第二件琐事记录)",
+                "日常([[people/user]], 第三件琐事记录)",
+                "日常([[people/user]], 第四件琐事记录)",
+                "日常([[people/user]], 第五件琐事记录)",
+                "日常([[people/user]], 第六件琐事记录)",
+                "日常([[people/user]], 第七件超限琐事记录)",
+              ],
+            },
+          ],
+          rapport_rules: [],
+        },
+      });
+    } catch (err) {
+      caughtError = err as Error;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.message).toContain("[L7]");
+    expect(caughtError?.message).toContain("too_coarse");
+
+    // Verify 100% atomic rollback on disk:
+    // 1) Newly written dirty event file and concern file must be removed
+    expect(
+      fs.existsSync(path.join(memDir, "events", "2026-11-12-overloaded-dump.md")),
+    ).toBe(false);
+    expect(
+      fs.existsSync(path.join(memDir, "concerns", "2026-11-01-con-neck-sore.md")),
+    ).toBe(false);
+    // 2) Bedtime reflection written in Step 1 must also be rolled back
+    expect(extractColdReflectionForDate(memDir, "2026-11-12")).toBeNull();
+
+    // Verify 100% atomic rollback in SQLite:
+    // Step 2 mutated `con-neck-sore` to `已淡化`, which must be restored back to `有效`!
+    expect(db.getConcernById("con-neck-sore")?.status).toBe("有效");
+    expect(db.getMemoryMeta("evt-overloaded-dump")).toBeNull();
+
+    fs.rmSync(memDir, { recursive: true, force: true });
+    db.close();
+  });
 });

@@ -40,6 +40,22 @@ export interface NightlyCompilerParams {
   verdict: EndocrineNightVerdict;
   coldReflection: string;
   planOverride?: CompilationPlan;
+  /** 是否允许显式取代受保护的钉子记忆（allow_forget: false 的非短期状态记忆 / 符号定义档），默认 false */
+  allowSupersedeProtected?: boolean;
+}
+
+export type SlotConflictReason =
+  | "protected_nail_memory"
+  | "unconfirmed_preference_or_event_collision";
+
+export interface PendingSlotConflict {
+  slotKey: string;
+  existingId: string;
+  existingFile: string;
+  incomingId: string;
+  incomingFile: string;
+  incomingValue: string;
+  reason: SlotConflictReason;
 }
 
 export interface NightlyCompileResult {
@@ -47,6 +63,7 @@ export interface NightlyCompileResult {
   supersededIds: string[];
   updatedConcernIds: string[];
   addedRapportRules: string[];
+  pendingConflicts: PendingSlotConflict[];
   lintReport: LintReport;
 }
 
@@ -61,7 +78,28 @@ const DIACHRONIC_EXEMPT_PREDICATES = new Set([
   "结转",
   "依据",
   "曾用状态",
+  "情境表态",
 ]);
+
+function isProtectedNailFile(file: ParsedMemoryFile): boolean {
+  if (
+    file.relPath.startsWith("people/") ||
+    file.frontmatter.type === "符号定义" ||
+    file.frontmatter.type === "内隐默契" ||
+    file.frontmatter.tier === "scar"
+  ) {
+    return true;
+  }
+  if (!file.frontmatter.allow_forget) {
+    // 客观短期状态品类（health / schedule 的伤病、日程流转）允许按状态演进正常闭环取代；
+    // 其余（preference / life_event / chat）一旦标为 allow_forget: false 即为不可自动覆写的钉子记忆
+    return (
+      file.frontmatter.category !== "health" &&
+      file.frontmatter.category !== "schedule"
+    );
+  }
+  return false;
+}
 
 function sanitizeSlug(raw: string): string {
   const cleaned = raw
@@ -351,8 +389,10 @@ async function generateCompilationPlanWithOrgan(params: {
     "请根据今日原始对话事件（带 log-* ID）、前台睡前自省冷叙事与现有活跃记忆，输出需要新增或状态变更的结构化编译计划 JSON。",
     "铁律：",
     "1. frontstage_narrative 必须原样采用前台日记中的第一人称原话，绝不自己捏造心理活动，且不得包含 log-* 或浮点数；",
-    "2. 若今日事件更新了某个人物或事项的现有状态（如脚伤康复取代之前的脚踝扭伤），必须在 supersedes 填入旧记忆的 id；",
-    "3. source_event_id 必须严格选用今日事件日志中真实存在的 log-* ID；",
+    "2. 严格区分四种情况决定是否填 supersedes：",
+    "   (a) 客观事实/状态迭代（如脚伤康复取代之前的脚踝扭伤、行程变更）-> 必须在 supersedes 填入旧记忆的 id；",
+    "   (b) 一时情绪气话、(c) 反话/打趣玩笑、(d) 特定情境下的临时表态 -> 严禁填 supersedes 覆盖长期偏好或身份设定，应使用“情境表态(...)”谓词记录当晚片段；",
+    "3. 单文件断言控制在 1~6 条以内（原子化记忆），source_event_id 必须严格选用今日事件日志中真实存在的 log-* ID；",
     "4. 仅输出合法的 JSON 对象，结构符合：{ memories: [...], rapport_rules: [...] }。",
   ].join("\n");
 
@@ -426,6 +466,7 @@ export async function runNightlyCompiler(
   const supersededIds: string[] = [];
   const updatedConcernIds: string[] = [];
   const addedRapportRules: string[] = [];
+  const pendingConflicts: PendingSlotConflict[] = [];
   const supersededReplacementMap = new Map<string, string>();
 
   // 1. 根据情绪官《情绪结转裁决单》编译/更新 `concerns/*.md`
@@ -719,42 +760,108 @@ export async function runNightlyCompiler(
       return line;
     });
 
-    // L4 & L3 守卫：检查是否与现有活跃文件的同一主语#属性槽位冲突，自动补齐 supersedes 链并防止自指
+    // L4 & L3 守卫 + Z 式冲突待复核门（Wave 1 止血护栏）：
+    // 1. 仅当新记忆显式指定 supersedes 或属于客观短期状态流转（health/schedule 的 当前状态），且旧文件非受保护钉子记忆时，才自动翻转旧文件为 `已取代`；
+    // 2. 若撞上受保护钉子记忆（allow_forget: false 的非短期状态记忆 / people/* 符号定义）或未显式声明 supersedes 的偏好/事件同槽位碰撞，
+    //    保留旧文件为 `有效`，将新文件中的冲突断言降级为 `情境表态(...)`，并记入 pendingConflicts。
+    const explicitSupersedeIds = new Set<string>(
+      (spec.supersedes ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((id) => Boolean(id) && id !== spec.id && existingById.has(id)),
+    );
+
     const targetOldIds = new Set<string>();
-    if (
-      spec.supersedes &&
-      spec.supersedes !== spec.id &&
-      existingById.has(spec.supersedes)
-    ) {
-      targetOldIds.add(spec.supersedes);
-    }
-
-    if (spec.status === "有效") {
-      for (const line of normalizedAssertions) {
-        const cleanLine = line.startsWith("- ") ? line : `- ${line}`;
-        const predMatch = cleanLine.match(/^-\s*([^\s(（]+)\s*\((.+)\)$/);
-        if (!predMatch) continue;
-        const predName = predMatch[1]!;
-        const argsRaw = predMatch[2]!;
-        if (DIACHRONIC_EXEMPT_PREDICATES.has(predName)) continue;
-
-        const slotArgMatch = argsRaw.match(
-          /^\s*(\[\[[^\]]+\]\](?:#[^,\s]+)?)\s*,\s*(.+)$/,
-        );
-        if (slotArgMatch) {
-          const subjectSlot = slotArgMatch[1]!.trim();
-          if (
-            subjectSlot.includes("#") ||
-            SINGLE_VALUED_SYNCHRONIC_PREDICATES.has(predName)
-          ) {
-            const owner = activeSlotOwners.get(`${predName}::${subjectSlot}`);
-            if (owner && owner.frontmatter.id !== spec.id) {
-              targetOldIds.add(owner.frontmatter.id);
-            }
-          }
-        }
+    for (const explicitOldId of explicitSupersedeIds) {
+      const oldFile = existingById.get(explicitOldId)!;
+      if (isProtectedNailFile(oldFile) && !params.allowSupersedeProtected) {
+        pendingConflicts.push({
+          slotKey: `supersedes::${oldFile.symbolKey}`,
+          existingId: oldFile.frontmatter.id,
+          existingFile: oldFile.relPath,
+          incomingId: spec.id,
+          incomingFile: spec.rel_path,
+          incomingValue: spec.assertions.join("；"),
+          reason: "protected_nail_memory",
+        });
+      } else {
+        targetOldIds.add(explicitOldId);
       }
     }
+
+    const guardedAssertions = normalizedAssertions.map((line) => {
+      if (spec.status !== "有效") return line;
+      const cleanLine = line.startsWith("- ") ? line : `- ${line}`;
+      const predMatch = cleanLine.match(/^-\s*([^\s(（]+)\s*\((.+)\)$/);
+      if (!predMatch) return line;
+      const predName = predMatch[1]!;
+      const argsRaw = predMatch[2]!;
+      if (DIACHRONIC_EXEMPT_PREDICATES.has(predName)) return line;
+
+      const slotArgMatch = argsRaw.match(
+        /^\s*(\[\[[^\]]+\]\](?:#[^,\s]+)?)\s*,\s*(.+)$/,
+      );
+      if (!slotArgMatch) return line;
+
+      const subjectSlot = slotArgMatch[1]!.trim();
+      const incomingValue = slotArgMatch[2]!.trim();
+      if (
+        !subjectSlot.includes("#") &&
+        !SINGLE_VALUED_SYNCHRONIC_PREDICATES.has(predName)
+      ) {
+        return line;
+      }
+
+      const slotKey = `${predName}::${subjectSlot}`;
+      const owner = activeSlotOwners.get(slotKey);
+      if (!owner || owner.frontmatter.id === spec.id) {
+        return line;
+      }
+
+      const isExplicitlySuperseded = explicitSupersedeIds.has(
+        owner.frontmatter.id,
+      );
+      const isTransientStateEvolution =
+        predName === "当前状态" &&
+        (spec.category === "health" || spec.category === "schedule") &&
+        (owner.frontmatter.category === "health" ||
+          owner.frontmatter.category === "schedule");
+      const ownerProtected =
+        isProtectedNailFile(owner) && !params.allowSupersedeProtected;
+
+      if (
+        !ownerProtected &&
+        (isExplicitlySuperseded || isTransientStateEvolution)
+      ) {
+        targetOldIds.add(owner.frontmatter.id);
+        return line;
+      }
+
+      // Z 式拦截：不覆盖旧文件，将新断言降级为非排他的历时/情境观察 `情境表态(...)` 并记录待复核冲突
+      targetOldIds.delete(owner.frontmatter.id);
+      const reason: SlotConflictReason = ownerProtected
+        ? "protected_nail_memory"
+        : "unconfirmed_preference_or_event_collision";
+      if (
+        !pendingConflicts.some(
+          (c) =>
+            c.existingId === owner.frontmatter.id &&
+            c.incomingId === spec.id &&
+            c.slotKey === slotKey,
+        )
+      ) {
+        pendingConflicts.push({
+          slotKey,
+          existingId: owner.frontmatter.id,
+          existingFile: owner.relPath,
+          incomingId: spec.id,
+          incomingFile: spec.rel_path,
+          incomingValue,
+          reason,
+        });
+      }
+      return `- 情境表态(${subjectSlot}, ${incomingValue})`;
+    });
 
     const effectiveSupersedes =
       targetOldIds.size > 0 ? Array.from(targetOldIds).join(", ") : undefined;
@@ -810,7 +917,7 @@ export async function runNightlyCompiler(
       memoryDir,
       relPath: spec.rel_path,
       frontmatter: compiledFm,
-      assertions: normalizedAssertions,
+      assertions: guardedAssertions,
       frontstageNarrative: narrativeToWrite,
     });
 
@@ -818,13 +925,13 @@ export async function runNightlyCompiler(
       relPath: spec.rel_path,
       symbolKey: newSymbolKey,
       frontmatter: compiledFm,
-      body: formatCompiledMarkdownBody(normalizedAssertions, narrativeToWrite),
+      body: formatCompiledMarkdownBody(guardedAssertions, narrativeToWrite),
       rawContent: "",
     };
     existingById.set(compiledFm.id, newParsedFile);
     existingBySymbol.set(newSymbolKey, newParsedFile);
     if (compiledFm.status === "有效") {
-      for (const line of normalizedAssertions) {
+      for (const line of guardedAssertions) {
         const cleanLine = line.startsWith("- ") ? line : `- ${line}`;
         const predMatch = cleanLine.match(/^-\s*([^\s(（]+)\s*\((.+)\)$/);
         if (!predMatch) continue;
@@ -868,7 +975,7 @@ export async function runNightlyCompiler(
     supersededReplacementMap,
   });
 
-  // 6. 同步 SQLite `memory_meta` 并执行 L1~L6 体检
+  // 6. 同步 SQLite `memory_meta` 并执行 L1~L7 体检
   syncMemoryMetaFromFiles({ memoryDir, db, now });
   const lintReport = runMemoryLinter({ memoryDir, db, now });
 
@@ -877,6 +984,7 @@ export async function runNightlyCompiler(
     supersededIds: Array.from(new Set(supersededIds)),
     updatedConcernIds: Array.from(new Set(updatedConcernIds)),
     addedRapportRules,
+    pendingConflicts,
     lintReport,
   };
 }

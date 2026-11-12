@@ -62,6 +62,101 @@ export function localCalendarDaysBetween(
   return Math.max(0, Math.floor((endMs - startMs) / (24 * 3600 * 1000)));
 }
 
+const WEEKDAY_LABELS = [
+  "周日",
+  "周一",
+  "周二",
+  "周三",
+  "周四",
+  "周五",
+  "周六",
+] as const;
+
+export function getTimeOfDaySlot(hour: number): string {
+  if (hour < 5) return "凌晨";
+  if (hour < 8) return "早上";
+  if (hour < 11) return "上午";
+  if (hour < 13) return "中午";
+  if (hour < 17) return "下午";
+  if (hour < 19) return "傍晚";
+  if (hour < 23) return "晚上";
+  return "深夜";
+}
+
+/**
+ * Wave 2 回想时刻自然粗化（吸收自 Psyche `traces.md` §3.2）：
+ * - 今天：今天凌晨 / 早上 / 上午 / 中午 / 下午 / 傍晚 / 晚上 / 深夜（纯日期则返回“今天”）
+ * - 昨天、前天：昨天深夜、前天下午
+ * - 7 天内：MM-DD（周X）晚上
+ * - 更早：YYYY-MM-DD
+ */
+export function formatVagueWhen(
+  eventIsoOrDate: Date | string,
+  now: Date,
+): string {
+  if (typeof eventIsoOrDate === "string") {
+    const trimmed = eventIsoOrDate.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      const daysAgo = localCalendarDaysBetween(trimmed, now);
+      if (daysAgo === 0) return "今天";
+      if (daysAgo === 1) return "昨天";
+      if (daysAgo === 2) return "前天";
+      if (daysAgo <= 7) {
+        const [y, m, d] = trimmed.split("-").map(Number);
+        if (y && m && d) {
+          const localDt = new Date(y, m - 1, d);
+          return `${pad2(m)}-${pad2(d)}（${WEEKDAY_LABELS[localDt.getDay()]}）`;
+        }
+      }
+      return trimmed;
+    }
+  }
+
+  const d =
+    typeof eventIsoOrDate === "string"
+      ? new Date(eventIsoOrDate)
+      : eventIsoOrDate;
+  if (Number.isNaN(d.getTime())) {
+    return String(eventIsoOrDate).slice(0, 10);
+  }
+
+  const slot = getTimeOfDaySlot(d.getHours());
+  const daysAgo = localCalendarDaysBetween(d, now);
+  if (daysAgo === 0) return `今天${slot}`;
+  if (daysAgo === 1) return `昨天${slot}`;
+  if (daysAgo === 2) return `前天${slot}`;
+  if (daysAgo <= 7) {
+    return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}（${WEEKDAY_LABELS[d.getDay()]}）${slot}`;
+  }
+  return formatLocalDateStr(d);
+}
+
+/**
+ * Wave 2 相邻事件停顿体感提示（吸收自 Psyche `traces.md` §3.2b）：
+ * - < 10 分钟：null（连续对话）
+ * - 10–30 分钟：（过了一会儿）
+ * - 30–60 分钟：（过了半个多小时）
+ * - >= 60 分钟：（隔了约 N 小时）
+ * - >= 24 小时：（隔了约 N 天）
+ */
+export function formatGapHint(deltaMs: number): string | null {
+  if (!Number.isFinite(deltaMs) || deltaMs < 10 * 60_000) {
+    return null;
+  }
+  if (deltaMs < 30 * 60_000) {
+    return "（过了一会儿）";
+  }
+  if (deltaMs < 60 * 60_000) {
+    return "（过了半个多小时）";
+  }
+  if (deltaMs < 24 * 3_600_000) {
+    const hours = Math.max(1, Math.round(deltaMs / 3_600_000));
+    return `（隔了约 ${hours} 小时）`;
+  }
+  const days = Math.max(1, Math.round(deltaMs / 86_400_000));
+  return `（隔了约 ${days} 天）`;
+}
+
 export class VirtualClock implements Clock {
   private fixedTimeMs: number | null;
   private offsetMs = 0;

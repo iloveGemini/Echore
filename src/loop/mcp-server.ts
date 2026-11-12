@@ -223,6 +223,7 @@ export class EchoreMcpServer {
       query: input.userMessage,
       now,
       activeConcerns: activeConcernsBefore,
+      excludeEventIds: new Set([userEvent.id]),
     });
 
     const rawPulse = await this.engine.evaluatePulseWithOrgan({
@@ -260,6 +261,7 @@ export class EchoreMcpServer {
       memoryDir: this.engine.memoryDir,
       recalledItems: recalled.items,
       isNegativeOrConflictTurn,
+      isIdleQuery: recalled.isIdleQuery,
       now,
     });
 

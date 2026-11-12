@@ -165,9 +165,11 @@ export interface SleepCycleOptions {
   overrideReflectionText?: string;
   /** 可选直接注入记忆官编译计划（不传则由 compiler 模型根据今日日志生成） */
   compilationPlanOverride?: CompilationPlan;
+  /** 是否允许显式取代受保护的钉子记忆（默认 false） */
+  allowSupersedeProtected?: boolean;
   /** 本轮衰减跨越天数（默认 1 天） */
   elapsedDecayDays?: number;
-  /** 是否在 L1~L6 体检通过后对独立记忆仓执行 git commit（默认 true） */
+  /** 是否在 L1~L7 体检通过后对独立记忆仓执行 git commit（默认 true） */
   autoGitCommit?: boolean;
 }
 
@@ -240,6 +242,43 @@ function commitStandaloneMemoryRepo(
   return revRes.status === 0 ? revRes.stdout.trim() : null;
 }
 
+function snapshotMemoryDirFiles(
+  baseDir: string,
+  subDir = "",
+  acc = new Map<string, string>(),
+): Map<string, string> {
+  const target = path.join(baseDir, subDir);
+  if (!fs.existsSync(target)) return acc;
+  const entries = fs.readdirSync(target, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === ".git") continue;
+    const rel = path.posix.join(subDir, entry.name);
+    if (entry.isDirectory()) {
+      snapshotMemoryDirFiles(baseDir, rel, acc);
+    } else if (entry.isFile()) {
+      acc.set(rel, fs.readFileSync(path.join(baseDir, rel), "utf8"));
+    }
+  }
+  return acc;
+}
+
+function restoreMemoryDirSnapshot(
+  baseDir: string,
+  snapshot: Map<string, string>,
+): void {
+  const currentFiles = snapshotMemoryDirFiles(baseDir);
+  for (const rel of currentFiles.keys()) {
+    if (!snapshot.has(rel)) {
+      fs.rmSync(path.join(baseDir, rel), { force: true });
+    }
+  }
+  for (const [rel, content] of snapshot.entries()) {
+    const abs = path.join(baseDir, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content, "utf8");
+  }
+}
+
 /**
  * Echore 主循环总控（M1 串通【环 1：实时交互环 Reactive Loop】）
  */
@@ -251,6 +290,8 @@ export class EchoreEngine {
   readonly router: OrganModelRouter;
   private readonly frontstageTools: ZodTool[];
   private readonly appendOnlyHistory: ChatMessage[] = [];
+  private recentSessionRecalledIds: string[] = [];
+  private lastUserTurnAtMs: number | null = null;
 
   constructor(options: EchoreEngineOptions) {
     this.clock = options.clock;
@@ -502,14 +543,37 @@ export class EchoreEngine {
       }
     }
 
-    // Step 2: [记忆官] 三桶五路召回 + 原话引文预水合
+    // Step 2: [记忆官] 三桶五路召回 + 会话去重 + 三层级联 + 原话引文预水合
+    if (
+      this.lastUserTurnAtMs !== null &&
+      now.getTime() - this.lastUserTurnAtMs > 2 * 3600 * 1000
+    ) {
+      // 超过 2 小时视为新一段会话，清空本会话已注入去重滑窗
+      this.recentSessionRecalledIds = [];
+    }
+    this.lastUserTurnAtMs = now.getTime();
+
     const recalled = recallMemories({
       memoryDir: this.memoryDir,
       db: this.db,
       query: userMessage,
       now,
       activeConcerns: activeConcernsBefore,
+      recentSessionRecalledIds: new Set(this.recentSessionRecalledIds),
+      excludeEventIds: new Set([userEvent.id]),
     });
+
+    if (!recalled.isIdleQuery) {
+      for (const item of recalled.items) {
+        if (item.bucket !== "bucket_a_mainline") {
+          this.recentSessionRecalledIds.push(item.id);
+        }
+      }
+      if (this.recentSessionRecalledIds.length > 15) {
+        this.recentSessionRecalledIds =
+          this.recentSessionRecalledIds.slice(-15);
+      }
+    }
 
     // Step 3: [情绪官] 推进实时激素衰减 + 出厂前四道调准 + 生成零数字交接单
     const steppedHormones = stepHormones({
@@ -555,6 +619,7 @@ export class EchoreEngine {
       memoryDir: this.memoryDir,
       recalledItems: recalled.items,
       isNegativeOrConflictTurn,
+      isIdleQuery: recalled.isIdleQuery,
       now,
     });
 
@@ -876,7 +941,8 @@ export class EchoreEngine {
    * Step 1 [前台] 汇总当日交互与独居热记事，撰写第一人称睡前自省冷叙事（保住自传产权）
    * Step 2 [情绪官] 肝脏结算：出具《情绪结转裁决单》(T1 满 7 天淡化 / T2 满 5 天转冷战封顶 / T3 满 21 天留疤 / 日内和解落定)
    * Step 3 [记忆官] 唯一编译器：更新 people/ events/ concerns/ rapport.md，维护 supersedes 取代链并保留前台原叙
-   * Step 4 [系统] 分品类定步长衰减 + status:已沉底 归档 + 跑通 L1~L6 体检 + 自动 git commit
+   * Step 4 [系统] 分品类定步长衰减 + status:已沉底 归档 + 跑通 L1~L7 体检 + 自动 git commit
+   * 护栏：进入写操作前记录磁盘快照与 SQLite 检查点，若任何步骤失败或 L1~L7 未通过则 100% 原子回滚。
    */
   async runSleepCycle(
     options: SleepCycleOptions = {},
@@ -884,103 +950,186 @@ export class EchoreEngine {
     const now = this.clock.now();
     const dateStr = this.clock.todayStr();
 
-    const stepped = stepHormones({
-      state: this.db.getHormoneState(),
-      profile: this.profile,
-      now,
-      activeConcerns: this.db.listActiveConcerns(),
-    });
-    const currentHormones: HormoneState = {
-      ...stepped,
-      melatonin: Math.max(stepped.melatonin, 0.78),
-    };
-    this.db.saveHormoneState(currentHormones);
+    // 睡前原子快照（磁盘文件 + SQLite 状态表）
+    const diskSnapshot = snapshotMemoryDirFiles(this.memoryDir);
+    const hormoneBackup = this.db.sqlite
+      .query("SELECT * FROM hormone_state")
+      .all() as Array<Record<string, unknown>>;
+    const concernsBackup = this.db.sqlite
+      .query("SELECT * FROM concerns")
+      .all() as Array<Record<string, unknown>>;
+    const metaBackup = this.db.sqlite
+      .query("SELECT * FROM memory_meta")
+      .all() as Array<Record<string, unknown>>;
 
-    const currentHandover = buildSubconsciousHandover({
-      hormoneState: currentHormones,
-      profile: this.profile,
-      activeConcerns: this.db.listActiveConcerns(),
-      db: this.db,
-      now,
-    });
-
-    // Step 1: [前台] 撰写第一人称睡前自省冷叙事
-    const coldReflection = await synthesizeBedtimeReflection({
-      router: this.router,
-      profile: this.profile,
-      memoryDir: this.memoryDir,
-      dateStr,
-      now,
-      handover: currentHandover,
-      overrideReflectionText: options.overrideReflectionText,
-    });
-
-    // Step 2: [情绪官] 夜间肝脏结算，出具《情绪结转裁决单》
-    const verdict = settleNightlyConcerns({
-      db: this.db,
-      profile: this.profile,
-      now,
-    });
-
-    // Step 3: [记忆官] 唯一 Markdown 编译器落盘结构化断言与 rapport.md
-    const compileResult = await runNightlyCompiler({
-      memoryDir: this.memoryDir,
-      db: this.db,
-      router: this.router,
-      now,
-      dateStr,
-      verdict,
-      coldReflection,
-      planOverride: options.compilationPlanOverride,
-    });
-
-    // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L6 终检 + git commit
-    const decayReport = runDailyMemoryDecayAndArchive({
-      memoryDir: this.memoryDir,
-      db: this.db,
-      now,
-      elapsedDays: options.elapsedDecayDays ?? 1,
-    });
-
-    if (decayReport.archivedIds.length > 0) {
-      reconcileSynchronicLinksToInactiveFiles({
-        memoryDir: this.memoryDir,
+    try {
+      const stepped = stepHormones({
+        state: this.db.getHormoneState(),
+        profile: this.profile,
+        now,
+        activeConcerns: this.db.listActiveConcerns(),
       });
-      syncMemoryMetaFromFiles({
+      const currentHormones: HormoneState = {
+        ...stepped,
+        melatonin: Math.max(stepped.melatonin, 0.78),
+      };
+      this.db.saveHormoneState(currentHormones);
+
+      const currentHandover = buildSubconsciousHandover({
+        hormoneState: currentHormones,
+        profile: this.profile,
+        activeConcerns: this.db.listActiveConcerns(),
+        db: this.db,
+        now,
+      });
+
+      // Step 1: [前台] 撰写第一人称睡前自省冷叙事
+      const coldReflection = await synthesizeBedtimeReflection({
+        router: this.router,
+        profile: this.profile,
+        memoryDir: this.memoryDir,
+        dateStr,
+        now,
+        handover: currentHandover,
+        overrideReflectionText: options.overrideReflectionText,
+      });
+
+      // Step 2: [情绪官] 夜间肝脏结算，出具《情绪结转裁决单》
+      const verdict = settleNightlyConcerns({
+        db: this.db,
+        profile: this.profile,
+        now,
+      });
+
+      // Step 3: [记忆官] 唯一 Markdown 编译器落盘结构化断言与 rapport.md
+      const compileResult = await runNightlyCompiler({
+        memoryDir: this.memoryDir,
+        db: this.db,
+        router: this.router,
+        now,
+        dateStr,
+        verdict,
+        coldReflection,
+        planOverride: options.compilationPlanOverride,
+        allowSupersedeProtected: options.allowSupersedeProtected,
+      });
+
+      // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L7 终检 + git commit
+      const decayReport = runDailyMemoryDecayAndArchive({
+        memoryDir: this.memoryDir,
+        db: this.db,
+        now,
+        elapsedDays: options.elapsedDecayDays ?? 1,
+      });
+
+      if (decayReport.archivedIds.length > 0) {
+        reconcileSynchronicLinksToInactiveFiles({
+          memoryDir: this.memoryDir,
+        });
+        syncMemoryMetaFromFiles({
+          memoryDir: this.memoryDir,
+          db: this.db,
+          now,
+        });
+      }
+
+      const lintReport = runMemoryLinter({
         memoryDir: this.memoryDir,
         db: this.db,
         now,
       });
+
+      if (!lintReport.passed) {
+        const details = lintReport.issues
+          .map((i) => `[${i.rule}] ${i.file}: ${i.message}`)
+          .join("; ");
+        throw new Error(
+          `[MemoryCILinterFailed] 夜间冷写未通过 L1~L7 机检守卫，拒绝提交并回滚: ${details}`,
+        );
+      }
+
+      const gitCommitHash =
+        options.autoGitCommit !== false
+          ? commitStandaloneMemoryRepo(this.memoryDir, dateStr)
+          : null;
+
+      return {
+        dateStr,
+        coldReflection,
+        verdict,
+        compileResult,
+        decayReport,
+        lintReport,
+        gitCommitHash,
+      };
+    } catch (err) {
+      // 原子回滚磁盘 Markdown 仓与 SQLite 状态表
+      restoreMemoryDirSnapshot(this.memoryDir, diskSnapshot);
+      const rollbackTx = this.db.sqlite.transaction(() => {
+        this.db.sqlite.exec("DELETE FROM hormone_state;");
+        for (const r of hormoneBackup) {
+          this.db.sqlite
+            .query(
+              `INSERT INTO hormone_state (id, cortisol, oxytocin, dopamine, melatonin, floor_cort, cap_ox, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              r.id as number,
+              r.cortisol as number,
+              r.oxytocin as number,
+              r.dopamine as number,
+              r.melatonin as number,
+              r.floor_cort as number,
+              r.cap_ox as number,
+              r.updated_at as string,
+            );
+        }
+
+        this.db.sqlite.exec("DELETE FROM concerns;");
+        for (const c of concernsBackup) {
+          this.db.sqlite
+            .query(
+              `INSERT INTO concerns (id, tier, status, summary, source_event_id, created_at, updated_at, floor_cort, cap_ox, has_prep, settled_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              c.id as string,
+              c.tier as string,
+              c.status as string,
+              c.summary as string,
+              c.source_event_id as string,
+              c.created_at as string,
+              c.updated_at as string,
+              c.floor_cort as number,
+              c.cap_ox as number,
+              c.has_prep as number,
+              (c.settled_at as string | null) ?? null,
+            );
+        }
+
+        this.db.sqlite.exec("DELETE FROM memory_meta;");
+        for (const m of metaBackup) {
+          this.db.sqlite
+            .query(
+              `INSERT INTO memory_meta (id, path, category, status, allow_forget, strength, access_count, last_accessed, embedding_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              m.id as string,
+              m.path as string,
+              m.category as string,
+              m.status as string,
+              m.allow_forget as number,
+              m.strength as number,
+              m.access_count as number,
+              m.last_accessed as string,
+              (m.embedding_json as string | null) ?? null,
+              m.updated_at as string,
+            );
+        }
+      });
+      rollbackTx();
+      throw err;
     }
-
-    const lintReport = runMemoryLinter({
-      memoryDir: this.memoryDir,
-      db: this.db,
-      now,
-    });
-
-    if (!lintReport.passed) {
-      const details = lintReport.issues
-        .map((i) => `[${i.rule}] ${i.file}: ${i.message}`)
-        .join("; ");
-      throw new Error(
-        `[MemoryCILinterFailed] 夜间冷写未通过 L1~L6 机检守卫，拒绝提交: ${details}`,
-      );
-    }
-
-    const gitCommitHash =
-      options.autoGitCommit !== false
-        ? commitStandaloneMemoryRepo(this.memoryDir, dateStr)
-        : null;
-
-    return {
-      dateStr,
-      coldReflection,
-      verdict,
-      compileResult,
-      decayReport,
-      lintReport,
-      gitCommitHash,
-    };
   }
 }
