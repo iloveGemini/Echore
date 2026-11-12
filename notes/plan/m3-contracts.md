@@ -137,8 +137,7 @@
   - 按距上次激素更新的真实/虚拟分钟数调用 `stepHormones` 推进 4 激素向 $F_h / B_h$ 指数回归并刷新褪黑素；
   - 采集 `ChronoAmbientSlice` 与 `DesktopPresenceResult`。
 - **Step 2：反射层睡眠入夜闸门**：
-  - 若当前褪黑素刚跨入睡眠锁（或处于睡眠窗口）且今日尚未执行过睡前冷叙事（`extractColdReflectionForDate === null`），自动触发 `runSleepCycle()`，返回 `branch: "sleep_cycle"`。
-- **Step 3：意愿分流器（Arbitrator）三分支裁决**：
+  - 若当前褪黑素跨入睡眠锁（或处于睡眠窗口），通过 `resolveTargetDateForSleepCycle(now)` 动态判定当前是否存在尚未封底的目标起居日；若存在未封底起居日（`targetSleepDate !== null`），自动触发 `runSleepCycle({ targetDateStr: targetSleepDate })` 消费增量事件游标并封底日记，返回 `branch: "sleep_cycle"`；若当夜已完成封底（哪怕用户在清晨 07:00 提早醒来开启了今日新日记），同一睡眠窗口内后续心跳均保持静默睡眠呼吸（`idle`），绝不在清晨误触发第二次睡眠环。
   - **分支 A `proactive`（主动破冰）**：
     - 前置条件：`evaluateReflexGuard` 放行（`canProactiveWake === true`），且当前未处于冷战催产素封顶期（`hormoneState.cap_ox >= profile.baselines.oxytocin`）；
     - 触发条件（满足其一）：① 天气剧变或桌面连续专注超 3h（`continuousFocusHours >= 3`）；② 存在刚完成的暗中准备（活跃牵挂 `has_prep === true`）；③ 催产素滑入想念区 $[F_{\text{ox}}, B_{\text{ox}})$；

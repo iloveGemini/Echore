@@ -279,7 +279,7 @@ export class EchoreMcpServer {
 
     const journalEntry = appendHotJournalEntry({
       memoryDir: this.engine.memoryDir,
-      dateStr: this.engine.clock.todayStr(),
+      dateStr: this.engine.getCircadianDateStr(now),
       timeStr: formatLocalTimeHm(now),
       tag: "交互",
       firstPersonText: `在外面陪他聊了“${input.userMessage.slice(0, 30)}”，我回他：“${input.assistantReply.slice(0, 60)}”`,
@@ -313,7 +313,7 @@ export class EchoreMcpServer {
     tag?: "交互" | "独居";
   }): { entryLine: string; dateStr: string } {
     const now = this.engine.clock.now();
-    const dateStr = this.engine.clock.todayStr();
+    const dateStr = this.engine.getCircadianDateStr(now);
 
     const entryLine = appendHotJournalEntry({
       memoryDir: this.engine.memoryDir,

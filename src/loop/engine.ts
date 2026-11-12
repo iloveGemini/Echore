@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { type Clock, formatLocalTimeHm } from "../core/clock.ts";
+import { type Clock, formatLocalDateStr, formatLocalTimeHm } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
@@ -40,6 +40,7 @@ import {
 import {
   appendHotJournalEntry,
   extractColdReflectionForDate,
+  extractHotEntriesForDate,
   synthesizeBedtimeReflection,
 } from "../frontstage/journal.ts";
 import {
@@ -88,7 +89,10 @@ import {
 } from "../perception/desktop-probe.ts";
 import type { WorldFeedFetcher } from "../perception/world-feed.ts";
 import {
+  CHRONOTYPE_SCHEDULES,
   evaluateReflexGuard,
+  getCircadianDateStr,
+  getDecimalHour,
   type ReflexEvaluation,
   recordProactiveSent,
   recordUserMessageReceived,
@@ -161,6 +165,8 @@ export interface HeartbeatOutput {
 }
 
 export interface SleepCycleOptions {
+  /** 可选显式指定结算目标日（默认按住户作息节律判定当前起居日，亦兼容显式传入 YYYY-MM-DD） */
+  targetDateStr?: string;
   /** 可选直接指定前台睡前自省冷叙事文本（不传则由 frontstage 模型汇总当日热记事生成） */
   overrideReflectionText?: string;
   /** 可选直接注入记忆官编译计划（不传则由 compiler 模型根据今日日志生成） */
@@ -336,6 +342,128 @@ export class EchoreEngine {
       this.db.saveHormoneState(resetHormones);
     }
     return this.profile;
+  }
+
+  /**
+   * 判断指定日期的日记是否已完成 `## 睡前自省` 封底
+   */
+  isDateSleepClosed(dateStr: string): boolean {
+    return extractColdReflectionForDate(this.memoryDir, dateStr) !== null;
+  }
+
+  /**
+   * 按当前住户作息节律与昨日日记封底状态计算当前时刻所属的起居日 YYYY-MM-DD：
+   * - 若处于跨午夜唤醒前窗口但昨日日记已写 `## 睡前自省` 封底（或早鸟作息午夜前已睡），直接开启今日新日记；
+   * - 若昨日尚未封底，熬夜互动继续归入昨日日记，待入睡时统一封底。
+   */
+  getCircadianDateStr(date: Date = this.clock.now()): string {
+    const schedule = CHRONOTYPE_SCHEDULES[this.profile.chronotype];
+    const hour = getDecimalHour(date);
+    if (hour < schedule.sleepLockEndHour) {
+      const yesterday = new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate() - 1,
+      );
+      const yesterdayStr = formatLocalDateStr(yesterday);
+      if (this.isDateSleepClosed(yesterdayStr)) {
+        return formatLocalDateStr(date);
+      }
+      if (schedule.sleepLockStartHour >= 12) {
+        const yesterdayHot = extractHotEntriesForDate(
+          this.memoryDir,
+          yesterdayStr,
+        );
+        return getCircadianDateStr(date, this.profile.chronotype, {
+          yesterdayClosed: yesterdayHot.length === 0,
+        });
+      }
+      return getCircadianDateStr(date, this.profile.chronotype, {
+        yesterdayClosed: false,
+      });
+    }
+    return formatLocalDateStr(date);
+  }
+
+  /**
+   * 判定当前入睡时刻应封底结算的目标起居日。若当夜已完成封底（哪怕用户清晨 07:00 提早醒来发了消息），返回 null 防止同夜/清晨重复触发
+   */
+  resolveTargetDateForSleepCycle(
+    now: Date = this.clock.now(),
+    explicitTargetDate?: string,
+  ): string | null {
+    if (explicitTargetDate) {
+      return explicitTargetDate;
+    }
+
+    const currentDateStr = formatLocalDateStr(now);
+    const hour = getDecimalHour(now);
+    const schedule = CHRONOTYPE_SCHEDULES[this.profile.chronotype];
+
+    // 若处于午夜后至清晨唤醒前窗口（hour < sleepLockEndHour，如 regular 01:00~08:00、night_owl 02:30~09:30、early_bird 00:00~06:30）
+    if (hour < schedule.sleepLockEndHour) {
+      const yesterday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 1,
+      );
+      const yesterdayStr = formatLocalDateStr(yesterday);
+
+      // 若昨日已完成睡前自省封底，说明当夜睡眠环已执行完毕，清晨唤醒前绝不二次触发睡眠环
+      if (this.isDateSleepClosed(yesterdayStr)) {
+        return null;
+      }
+
+      const yesterdayHot = extractHotEntriesForDate(
+        this.memoryDir,
+        yesterdayStr,
+      );
+      const unsettledEvents = this.db.getUnsettledEventLogs(
+        yesterdayStr,
+        this.profile.chronotype,
+      );
+      const hasYesterdayUnsettledEvents = unsettledEvents.some(
+        (e) => formatLocalDateStr(e.timestamp) <= yesterdayStr,
+      );
+      const todayHot = extractHotEntriesForDate(
+        this.memoryDir,
+        currentDateStr,
+      );
+
+      // 早鸟作息默认午夜前 (23:30) 入睡：仅当昨日确实遗留了未封底热记事或未结转事件时才在午夜后补封底
+      if (schedule.sleepLockStartHour >= 12) {
+        if (yesterdayHot.length > 0 || hasYesterdayUnsettledEvents) {
+          return yesterdayStr;
+        }
+        return null;
+      }
+
+      // 跨午夜作息 (regular / night_owl)：昨日有热记事或未结转事件，或今日尚无白天热记事 -> 封底昨日起居日
+      if (
+        yesterdayHot.length > 0 ||
+        hasYesterdayUnsettledEvents ||
+        todayHot.length === 0
+      ) {
+        if (this.isDateSleepClosed(currentDateStr)) {
+          return null;
+        }
+        return yesterdayStr;
+      }
+
+      // 兼容单测直接将同日时钟拨至凌晨 02:00（无昨日记录、仅有今日热记事且今日未封底）
+      if (!this.isDateSleepClosed(currentDateStr) && todayHot.length > 0) {
+        return currentDateStr;
+      }
+
+      return null;
+    }
+
+    // 午夜前（如 early_bird 在 23:30，或用户在 23:00 显式手动触发入睡）
+    if (!this.isDateSleepClosed(currentDateStr)) {
+      return currentDateStr;
+    }
+
+    return null;
   }
 
   getHistory(): readonly ChatMessage[] {
@@ -670,9 +798,10 @@ export class EchoreEngine {
     });
 
     // Step 5: 追加当日 journal/YYYY-MM-DD.md 第一人称热记事
+    const circadianDateStr = this.getCircadianDateStr(now);
     const journalEntry = appendHotJournalEntry({
       memoryDir: this.memoryDir,
-      dateStr: this.clock.todayStr(),
+      dateStr: circadianDateStr,
       timeStr: formatLocalTimeHm(now),
       tag: "交互",
       firstPersonText: `今天和他就“${userMessage.slice(0, 30)}”聊了几句，我回他：“${performance.replyText.slice(0, 60)}”`,
@@ -704,7 +833,7 @@ export class EchoreEngine {
   async onHeartbeat(options: HeartbeatOptions = {}): Promise<HeartbeatOutput> {
     const now = this.clock.now();
     const nowIso = this.clock.nowIso();
-    const dateStr = this.clock.todayStr();
+    const dateStr = this.getCircadianDateStr(now);
 
     const activeConcerns = this.db.listActiveConcerns();
     const reflexState = this.db.getReflexState();
@@ -738,13 +867,18 @@ export class EchoreEngine {
     });
 
     // Step 2: [反射层入夜闸门] 若处于睡眠锁且今日尚未执行睡前冷叙事 -> 自动触发环 3
+    const targetSleepDate = this.resolveTargetDateForSleepCycle(
+      now,
+      options.sleepCycleOptions?.targetDateStr,
+    );
     if (
       reflexEvaluation.sleepLocked &&
-      extractColdReflectionForDate(this.memoryDir, dateStr) === null
+      targetSleepDate !== null
     ) {
-      const sleepCycleOutput = await this.runSleepCycle(
-        options.sleepCycleOptions,
-      );
+      const sleepCycleOutput = await this.runSleepCycle({
+        ...options.sleepCycleOptions,
+        targetDateStr: targetSleepDate,
+      });
       return {
         branch: "sleep_cycle",
         hormoneState: this.db.getHormoneState(),
@@ -948,12 +1082,18 @@ export class EchoreEngine {
     options: SleepCycleOptions = {},
   ): Promise<SleepCycleOutput> {
     const now = this.clock.now();
-    const dateStr = this.clock.todayStr();
+    const dateStr =
+      options.targetDateStr ??
+      this.resolveTargetDateForSleepCycle(now) ??
+      this.clock.todayStr();
 
     // 睡前原子快照（磁盘文件 + SQLite 状态表）
     const diskSnapshot = snapshotMemoryDirFiles(this.memoryDir);
     const hormoneBackup = this.db.sqlite
       .query("SELECT * FROM hormone_state")
+      .all() as Array<Record<string, unknown>>;
+    const reflexBackup = this.db.sqlite
+      .query("SELECT * FROM reflex_state")
       .all() as Array<Record<string, unknown>>;
     const concernsBackup = this.db.sqlite
       .query("SELECT * FROM concerns")
@@ -961,7 +1101,6 @@ export class EchoreEngine {
     const metaBackup = this.db.sqlite
       .query("SELECT * FROM memory_meta")
       .all() as Array<Record<string, unknown>>;
-
     try {
       const stepped = stepHormones({
         state: this.db.getHormoneState(),
@@ -983,8 +1122,11 @@ export class EchoreEngine {
         now,
       });
 
-      // Step 1: [前台] 撰写第一人称睡前自省冷叙事（附带今日 30min 时间窗双向原话反馈链）
-      const todaysEvents = this.db.getEventLogsByDate(dateStr);
+      // Step 1: [前台] 撰写第一人称睡前自省冷叙事（按单调游标获取上次睡眠结转以来的增量事件，附带 30min 时间窗双向原话反馈链）
+      const todaysEvents = this.db.getUnsettledEventLogs(
+        dateStr,
+        this.profile.chronotype,
+      );
       const coldReflection = await synthesizeBedtimeReflection({
         router: this.router,
         profile: this.profile,
@@ -1014,8 +1156,9 @@ export class EchoreEngine {
         coldReflection,
         planOverride: options.compilationPlanOverride,
         allowSupersedeProtected: options.allowSupersedeProtected,
+        chronotype: this.profile.chronotype,
+        todaysEvents,
       });
-
       // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L7 终检 + git commit
       const decayReport = runDailyMemoryDecayAndArchive({
         memoryDir: this.memoryDir,
@@ -1049,12 +1192,16 @@ export class EchoreEngine {
           `[MemoryCILinterFailed] 夜间冷写未通过 L1~L7 机检守卫，拒绝提交并回滚: ${details}`,
         );
       }
+      const lastSettledEventId =
+        todaysEvents.length > 0
+          ? todaysEvents[todaysEvents.length - 1]!.id
+          : null;
+      this.db.advanceSleepCursor(this.clock.nowIso(), lastSettledEventId);
 
       const gitCommitHash =
         options.autoGitCommit !== false
           ? commitStandaloneMemoryRepo(this.memoryDir, dateStr)
           : null;
-
       return {
         dateStr,
         coldReflection,
@@ -1087,6 +1234,23 @@ export class EchoreEngine {
             );
         }
 
+        this.db.sqlite.exec("DELETE FROM reflex_state;");
+        for (const rf of reflexBackup) {
+          this.db.sqlite
+            .query(
+              `INSERT INTO reflex_state (id, consecutive_unanswered_proactive, last_proactive_at, last_user_message_at, proactive_lock, last_sleep_settled_at, last_sleep_event_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              rf.id as number,
+              rf.consecutive_unanswered_proactive as number,
+              (rf.last_proactive_at as string | null) ?? null,
+              (rf.last_user_message_at as string | null) ?? null,
+              rf.proactive_lock as number,
+              (rf.last_sleep_settled_at as string | null) ?? null,
+              (rf.last_sleep_event_id as string | null) ?? null,
+            );
+        }
         this.db.sqlite.exec("DELETE FROM concerns;");
         for (const c of concernsBackup) {
           this.db.sqlite

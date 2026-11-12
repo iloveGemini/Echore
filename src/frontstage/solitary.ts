@@ -22,7 +22,12 @@ import {
   type WorldFeedFetcher,
   type WorldFeedItem,
 } from "../perception/world-feed.ts";
-import { appendHotJournalEntry } from "./journal.ts";
+import { formatLocalDateStr } from "../core/clock.ts";
+import { getCircadianDateStr } from "../reflex/guard.ts";
+import {
+  appendHotJournalEntry,
+  extractColdReflectionForDate,
+} from "./journal.ts";
 
 export interface SolitaryTickOptions {
   clock: Clock;
@@ -252,7 +257,17 @@ export async function runSolitaryTick(
 
   const now = clock.now();
   const nowIso = clock.nowIso();
-  const dateStr = clock.todayStr();
+  const yesterday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() - 1,
+  );
+  const yesterdayClosed =
+    extractColdReflectionForDate(memoryDir, formatLocalDateStr(yesterday)) !==
+    null;
+  const dateStr = getCircadianDateStr(now, profile.chronotype, {
+    yesterdayClosed,
+  });
   const timeStr = formatLocalTimeHm(now);
 
   const solitaryDir = path.join(memoryDir, "solitary");

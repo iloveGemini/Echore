@@ -1,7 +1,7 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-12（完成记忆系统进化 **Wave 1–4 全部落地**：Z 式冲突待复核门、L7 颗粒度机检、睡眠环原子回滚、空档短路、会话去重、三层级联冷仓唤醒、时间体感、召回回放黄金评测集、IDF 实词打分、三通道 RRF 融合、二跳度数抑制图扩散，以及 **Wave 4 睡前 30min 双向原话反馈链、`rapport.md` 反例条件收窄与双门控 B 立场锚**，验证 45/45 测试全绿）。
+> 最后更新：2026-11-12（完成记忆系统进化 **Wave 1–4 全部落地**，以及**修复跨午夜作息睡眠代谢跳过昨日起居日对话与记忆编译的关键 Bug**，验证 46/46 测试全绿）。
 
 ## 1. 当前阶段与核心决议（2026-11-12）
 
@@ -26,6 +26,9 @@
     1. **30min 时间窗双向原话反馈链 (`journal.ts` · `compiler.ts`)**：`extractFeedbackTriplets` 按相邻消息 $\le 30\text{min}$ 切分连续对话段，机械配对 `prev -> acts -> next` 原话三联包递给睡前自省与夜间编译器，防自我美化。
     2. **默契反例条件收窄 (`compiler.ts` · `schemas.ts`)**：`RapportRuleSpecSchema` 支持 `revises_rule_prefix`，就地收窄既有 `rapport.md` 默契条目并更新 `[src: log-xxx]`。
     3. **双门控 B 立场锚 (`recall.ts`)**：同时满足门控 1（评价词 + 征询/反问词 `isStanceCue`）与门控 2（住户历史表态 `hasMemoryStance` + 实质话题重叠 `sem > 0.30 || kw > 0.25`）时，穿透会话去重并赋予 `+0.22` 立场锚加成（`[我之前的立场]`），根治闲聊顺从改口。
+- **跨午夜日记封底与单调睡眠游标修复（2026-11-12，吸收自 Psyche `coldCursor`）**：
+  1. **单调睡眠游标 (`src/core/db.ts` · `getUnsettledEventLogs` & `advanceSleepCursor`)**：`reflex_state` 记录 `last_sleep_settled_at` 与 `last_sleep_event_id`，睡前自省与记忆编译按 `rowid > cursor_rowid` 增量捞取未结转事件并配合 `idx_event_log_timestamp` 索引范围查询，彻底根除跨零点漏编、07:00 晨起“记忆孤儿”与全表扫描隐患（含睡眠环异常时游标原子回滚）。
+  2. **日记封底切分 (`src/reflex/guard.ts` · `getCircadianDateStr` & `src/loop/engine.ts`)**：跨午夜就寝前若昨日日记未写 `## 睡前自省`，熬夜互动归入昨日日记；一旦昨日日记已完成 `## 睡前自省` 封底（或早鸟作息 23:30 已入睡），此后凌晨夜醒或清晨 07:00 早起互动一律开启今日新日记 `journal/今日.md`，且清晨心跳不再误触发二次睡眠环。
 - **M3.1 已落地交付项（五官感知层 + 独居生活引擎）**：
   1. **四通道边际感知层 (`src/perception/`)**：`chrono-ambient.ts`（天气剧变/断联/特殊时间窗边际触发）、`desktop-probe.ts`（状态段去噪聚合 + 隐私黑名单 + 禁报进程名）、`world-feed.ts`（RSS/Atom 与 HTML 正文提取）。
   2. **独居生活引擎 (`src/frontstage/solitary.ts`)**：`runSolitaryTick` 实现 S1 `feed_roaming`、S2 `hobby_project`（`projects.yaml` 跨天目标进度树）、S3 `secret_prep`（`prep_for_user.md` + 置 `has_prep: true`），落盘 `event_log` 与 `journal/` 并将多巴胺回血至 $B_{\text{da}} + 0.12$。
@@ -59,7 +62,7 @@
 
 ## 3. 验证结果与运行备忘（2026-11-12）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **10 个测试文件、45/45 项测试（413 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **10 个测试文件、46/46 项测试（442 个断言）全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
-- **已知问题**：无阻塞问题；后端三环引擎与 HTTP/SSE 服务层均已就绪，可进入前端设计。
+- **已知问题**：无阻塞问题；跨午夜起居日闭环已打通，后端三环引擎与 HTTP/SSE 服务层就绪，可进入前端设计。

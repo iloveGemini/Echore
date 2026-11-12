@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { type Clock, formatLocalDateStr } from "./clock.ts";
 import {
+  type ChronotypeId,
   type ConcernRecord,
   ConcernRecordSchema,
   type EventLogRecord,
@@ -14,6 +15,7 @@ import {
   type ReflexState,
   ReflexStateSchema,
 } from "./schemas.ts";
+import { getCircadianDateStr } from "../reflex/guard.ts";
 
 export interface MemoryMetaRecord {
   id: string;
@@ -73,6 +75,8 @@ export class EchoreDatabase {
         metadata_json TEXT NOT NULL DEFAULT '{}'
       );
 
+      CREATE INDEX IF NOT EXISTS idx_event_log_timestamp ON event_log(timestamp);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS event_log_fts USING fts5(
         id UNINDEXED,
         speaker,
@@ -95,7 +99,9 @@ export class EchoreDatabase {
         consecutive_unanswered_proactive INTEGER NOT NULL DEFAULT 0,
         last_proactive_at TEXT,
         last_user_message_at TEXT,
-        proactive_lock INTEGER NOT NULL DEFAULT 0
+        proactive_lock INTEGER NOT NULL DEFAULT 0,
+        last_sleep_settled_at TEXT,
+        last_sleep_event_id TEXT
       );
 
       CREATE TABLE IF NOT EXISTS concerns (
@@ -155,6 +161,20 @@ export class EchoreDatabase {
       .all() as Array<{ name: string }>;
     if (!concernCols.some((c) => c.name === "settled_at")) {
       this.sqlite.exec("ALTER TABLE concerns ADD COLUMN settled_at TEXT;");
+    }
+
+    const reflexCols = this.sqlite
+      .query("PRAGMA table_info(reflex_state)")
+      .all() as Array<{ name: string }>;
+    if (!reflexCols.some((c) => c.name === "last_sleep_settled_at")) {
+      this.sqlite.exec(
+        "ALTER TABLE reflex_state ADD COLUMN last_sleep_settled_at TEXT;",
+      );
+    }
+    if (!reflexCols.some((c) => c.name === "last_sleep_event_id")) {
+      this.sqlite.exec(
+        "ALTER TABLE reflex_state ADD COLUMN last_sleep_event_id TEXT;",
+      );
     }
   }
 
@@ -254,14 +274,29 @@ export class EchoreDatabase {
     }));
   }
 
-  getEventLogsByDate(dateStr: string): EventLogRecord[] {
-    const rows = this.sqlite
-      .query(
-        `SELECT id, timestamp, role, speaker, content, metadata_json
-         FROM event_log
-         ORDER BY timestamp ASC, rowid ASC`,
-      )
-      .all() as Array<{
+  getEventLogsByDate(dateStr: string, chronotype?: ChronotypeId): EventLogRecord[] {
+    const baseMs = Date.parse(`${dateStr}T00:00:00.000Z`);
+    const rows = (
+      Number.isFinite(baseMs)
+        ? this.sqlite
+            .query(
+              `SELECT id, timestamp, role, speaker, content, metadata_json
+               FROM event_log
+               WHERE timestamp >= ? AND timestamp <= ?
+               ORDER BY timestamp ASC, rowid ASC`,
+            )
+            .all(
+              new Date(baseMs - 2 * 86_400_000).toISOString(),
+              new Date(baseMs + 2 * 86_400_000).toISOString(),
+            )
+        : this.sqlite
+            .query(
+              `SELECT id, timestamp, role, speaker, content, metadata_json
+               FROM event_log
+               ORDER BY timestamp ASC, rowid ASC`,
+            )
+            .all()
+    ) as Array<{
       id: string;
       timestamp: string;
       role: "user" | "assistant" | "solitary" | "system";
@@ -271,7 +306,15 @@ export class EchoreDatabase {
     }>;
 
     return rows
-      .filter((r) => formatLocalDateStr(r.timestamp) === dateStr)
+      .filter((r) => {
+        if (chronotype) {
+          return (
+            formatLocalDateStr(r.timestamp) === dateStr ||
+            getCircadianDateStr(new Date(r.timestamp), chronotype) === dateStr
+          );
+        }
+        return formatLocalDateStr(r.timestamp) === dateStr;
+      })
       .map((r) => ({
         id: r.id,
         timestamp: r.timestamp,
@@ -280,6 +323,100 @@ export class EchoreDatabase {
         content: r.content,
         metadata: JSON.parse(r.metadata_json || "{}"),
       }));
+  }
+
+  /**
+   * 吸收自 Psyche `coldCursor`：按单调游标获取上次睡眠结转以来的全部未结转事件。
+   * - 若已记录 `last_sleep_event_id`，直接按 SQLite `rowid > cursor_rowid` 增量捞取（零漏编、零重编）；
+   * - 若上次结转时无事件但记录了 `last_sleep_settled_at`，按 `timestamp > last_sleep_settled_at` 捞取；
+   * - 若尚无任何睡眠游标（首次入睡或独立单测），按 `fallbackDateStr` 与作息捞取当日及跨午夜未结转事件。
+   */
+  getUnsettledEventLogs(
+    fallbackDateStr?: string,
+    chronotype?: ChronotypeId,
+  ): EventLogRecord[] {
+    const reflexRow = this.sqlite
+      .query(
+        `SELECT last_sleep_settled_at, last_sleep_event_id
+         FROM reflex_state WHERE id = 1`,
+      )
+      .get() as {
+      last_sleep_settled_at: string | null;
+      last_sleep_event_id: string | null;
+    } | null;
+
+    type RawEventRow = {
+      id: string;
+      timestamp: string;
+      role: "user" | "assistant" | "solitary" | "system";
+      speaker: string;
+      content: string;
+      metadata_json: string;
+    };
+    const mapRow = (r: RawEventRow): EventLogRecord => ({
+      id: r.id,
+      timestamp: r.timestamp,
+      role: r.role,
+      speaker: r.speaker,
+      content: r.content,
+      metadata: JSON.parse(r.metadata_json || "{}"),
+    });
+
+    if (reflexRow?.last_sleep_event_id) {
+      const cursor = this.sqlite
+        .query("SELECT rowid FROM event_log WHERE id = ?")
+        .get(reflexRow.last_sleep_event_id) as { rowid: number } | null;
+      if (cursor) {
+        const rows = this.sqlite
+          .query(
+            `SELECT id, timestamp, role, speaker, content, metadata_json
+             FROM event_log
+             WHERE rowid > ?
+             ORDER BY timestamp ASC, rowid ASC`,
+          )
+          .all(cursor.rowid) as RawEventRow[];
+        return rows.map(mapRow);
+      }
+    }
+
+    if (reflexRow?.last_sleep_settled_at) {
+      const rows = this.sqlite
+        .query(
+          `SELECT id, timestamp, role, speaker, content, metadata_json
+           FROM event_log
+           WHERE timestamp > ?
+           ORDER BY timestamp ASC, rowid ASC`,
+        )
+        .all(reflexRow.last_sleep_settled_at) as RawEventRow[];
+      return rows.map(mapRow);
+    }
+
+    if (fallbackDateStr) {
+      return this.getEventLogsByDate(fallbackDateStr, chronotype);
+    }
+
+    const rows = this.sqlite
+      .query(
+        `SELECT id, timestamp, role, speaker, content, metadata_json
+         FROM event_log
+         ORDER BY timestamp ASC, rowid ASC`,
+      )
+      .all() as RawEventRow[];
+    return rows.map(mapRow);
+  }
+
+  advanceSleepCursor(
+    settledAtIso: string,
+    lastEventId?: string | null,
+  ): void {
+    this.sqlite
+      .query(
+        `UPDATE reflex_state
+         SET last_sleep_settled_at = ?,
+             last_sleep_event_id = COALESCE(?, last_sleep_event_id)
+         WHERE id = 1`,
+      )
+      .run(settledAtIso, lastEventId ?? null);
   }
 
   private static readonly CJK_STOP_PARTICLES = new Set([
@@ -376,7 +513,7 @@ export class EchoreDatabase {
   getReflexState(): ReflexState {
     const row = this.sqlite
       .query(
-        `SELECT consecutive_unanswered_proactive, last_proactive_at, last_user_message_at, proactive_lock
+        `SELECT consecutive_unanswered_proactive, last_proactive_at, last_user_message_at, proactive_lock, last_sleep_settled_at, last_sleep_event_id
          FROM reflex_state WHERE id = 1`,
       )
       .get() as {
@@ -384,24 +521,39 @@ export class EchoreDatabase {
       last_proactive_at: string | null;
       last_user_message_at: string | null;
       proactive_lock: number;
+      last_sleep_settled_at: string | null;
+      last_sleep_event_id: string | null;
     };
     return ReflexStateSchema.parse({
       consecutive_unanswered_proactive: row.consecutive_unanswered_proactive,
       last_proactive_at: row.last_proactive_at,
       last_user_message_at: row.last_user_message_at,
       proactive_lock: Boolean(row.proactive_lock),
+      last_sleep_settled_at: row.last_sleep_settled_at ?? null,
+      last_sleep_event_id: row.last_sleep_event_id ?? null,
     });
   }
 
   saveReflexState(state: ReflexState): void {
     const validated = ReflexStateSchema.parse(state);
+    const current = this.getReflexState();
+    const settledAt =
+      validated.last_sleep_settled_at !== undefined
+        ? validated.last_sleep_settled_at
+        : (current.last_sleep_settled_at ?? null);
+    const lastEventId =
+      validated.last_sleep_event_id !== undefined
+        ? validated.last_sleep_event_id
+        : (current.last_sleep_event_id ?? null);
     this.sqlite
       .query(
         `UPDATE reflex_state
          SET consecutive_unanswered_proactive = ?,
              last_proactive_at = ?,
              last_user_message_at = ?,
-             proactive_lock = ?
+             proactive_lock = ?,
+             last_sleep_settled_at = ?,
+             last_sleep_event_id = ?
          WHERE id = 1`,
       )
       .run(
@@ -409,6 +561,8 @@ export class EchoreDatabase {
         validated.last_proactive_at,
         validated.last_user_message_at,
         validated.proactive_lock ? 1 : 0,
+        settledAt,
+        lastEventId,
       );
   }
 

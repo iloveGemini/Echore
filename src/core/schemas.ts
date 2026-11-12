@@ -69,6 +69,8 @@ export const ReflexStateSchema = z.object({
   last_proactive_at: z.string().nullable(),
   last_user_message_at: z.string().nullable(),
   proactive_lock: z.boolean(),
+  last_sleep_settled_at: z.string().nullable().optional(),
+  last_sleep_event_id: z.string().nullable().optional(),
 });
 export type ReflexState = z.infer<typeof ReflexStateSchema>;
 

@@ -33,8 +33,9 @@ M2 聚焦跑通 **【环 3：昼夜新陈代谢环 Circadian Sleep Loop】** 及
    - 归档门：`allow_forget: true` 且 `days_since_last_access >= T_cat` 且 `strength <= 0.12` 时，将文件 YAML 头与 `memory_meta` 的 `status` 由 `有效` 改为 `已沉底`（严禁物理删档）。
 5. **环 3 总控串联 (`src/loop/engine.ts` · `EchoreEngine.runSleepCycle()`)**：
    - 完整串联 Step 1（前台睡前冷叙事）→ Step 2（情绪官肝脏结算）→ Step 3（记忆官唯一编译 + L1–L6 自愈校验）→ Step 4（定步长衰减归档 + L1–L6 终检 + 记忆仓自动 `git commit`）。
-   - **全仓时间语义铁律**：昼夜作息节律、日记日期（`clock.todayStr()`）、牵挂年龄（`age_days`）、记忆衰减未访问天数（`days_since_last_access`）与 L6 超期审计一律统一采用**引擎本地日历日**（`formatLocalDateStr` + `localCalendarDaysBetween`），严禁混用本地时刻与 UTC 日期切片（`toISOString().slice(0, 10)`）。
-
+   - **全仓时间、日记封底与睡眠游标铁律**：昼夜作息节律、日记日期、牵挂年龄（`age_days`）、记忆衰减未访问天数（`days_since_last_access`）与 L6 超期审计一律采用**引擎本地日历日**（`formatLocalDateStr` + `localCalendarDaysBetween`），严禁混用本地时刻与 UTC 日期切片；吸收自 Psyche 的「日历封底 + 睡眠单调游标 `(last_sleep_event_id, upTo]`」机制：
+     1) **睡眠事件增量游标 (`db.getUnsettledEventLogs` & `db.advanceSleepCursor`)**：睡前自省与记忆官编译捞取自上次睡眠结转游标以来的全部未结转 `event_log`，完成后推进游标，确保无论是午夜前（早鸟 23:30）、跨午夜（01:00 / 02:30）入睡，还是 07:00 清晨早起互动，均不漏编、不重编、不产生“记忆孤儿”；
+     2) **日记封底切分 (`getCircadianDateStr`)**：若处于跨午夜就寝窗口且昨日日记**尚未**写入 `## 睡前自省` 封底，熬夜互动归入昨日日记并由当夜睡眠封底；一旦昨日日记已完成 `## 睡前自省` 封底（或早鸟作息在午夜前已入睡），此后凌晨夜醒或清晨早起（如 07:00）的所有新互动一律开启今日新日记 `journal/今日.md`。
 ---
 
 ## 2. 模块接口契约
@@ -131,4 +132,5 @@ M2 聚焦跑通 **【环 3：昼夜新陈代谢环 Circadian Sleep Loop】** 及
 
 ### 2.7 `src/loop/engine.ts`
 - `EchoreEngine.runSleepCycle(options?: SleepCycleOptions): Promise<SleepCycleOutput>`
-  - **睡眠环原子回滚护栏（Wave 1）**：进入 Step 1–4 写操作前记录 `memoryDir` 文件快照与 SQLite（`hormone_state`、`concerns`、`memory_meta`）睡前检查点；若任意步骤抛错或最终 `L1–L7` Linter 未通过，100% 还原磁盘 `.md` 文件（含清理新增脏文件）与 SQLite 状态表后再抛出异常。
+  - `SleepCycleOptions` 支持可选 `targetDateStr?: string`（未指定时自动通过 `resolveTargetDateForSleepCycle` 判定待封底的起居日）；
+  - **睡眠游标推进与原子回滚护栏（Wave 1）**：进入 Step 1–4 写操作前记录 `memoryDir` 文件快照与 SQLite（`hormone_state`、`reflex_state`、`concerns`、`memory_meta`）睡前检查点；成功通过 `L1–L7` Linter 后推进 `reflex_state` 中的睡眠游标（`last_sleep_settled_at` / `last_sleep_event_id`）；若任意步骤抛错或最终 `L1–L7` 未通过，100% 还原磁盘 `.md` 文件与 SQLite 状态表（含游标回退）后再抛出异常。

@@ -317,4 +317,149 @@ describe("M3.2 【环 2：自主心跳环】与三环咬合", () => {
       env.cleanup();
     }
   });
+  test("5. 跨午夜起居日封底与单调睡眠游标：01:00 准确封底昨日、07:00 晨起开启今日新日记且不沦为记忆孤儿、早鸟午夜后不倒流", async () => {
+    const env = createTestEnv();
+    try {
+      // 白天 14:00 发生真实交互
+      const turnDay1 = await env.engine.onUserMessage("我最近每天早晨都喝曼特宁手冲咖啡", {
+        pulseOverride: {
+          event_summary: "用户分享每天早晨喝曼特宁手冲",
+          confidence: 0.95,
+          is_warm: true,
+        },
+      });
+
+      // 跨过午夜抵达 00:30（尚未入睡）：熬夜聊天仍归入 2026-11-10 日记
+      env.clock.advanceHours(10.5); // 14:00 + 10.5h = 次日 00:30
+      expect(env.clock.todayStr()).toBe("2026-11-11");
+      expect(env.engine.getCircadianDateStr()).toBe("2026-11-10");
+      const turnLateNight = await env.engine.onUserMessage("今晚熬夜把出差行李也收拾好了");
+
+      const day1JournalPath = path.join(env.memoryDir, "journal", "2026-11-10.md");
+      expect(fs.existsSync(day1JournalPath)).toBe(true);
+      const day1BeforeSleep = fs.readFileSync(day1JournalPath, "utf8");
+      expect(day1BeforeSleep).toContain("曼特宁手冲咖啡");
+      expect(day1BeforeSleep).toContain("出差行李");
+
+      // 推进 30 分钟抵达次日凌晨 01:00（进入 regular 睡眠锁 01:00~08:00）
+      env.clock.advanceMinutes(30);
+      expect(env.engine.getCircadianDateStr()).toBe("2026-11-10");
+
+      // 触发心跳：锁定 2026-11-10 执行冷闭环，推进睡眠游标至 00:30 最后一条事件
+      const hbSleep1 = await env.engine.onHeartbeat({
+        sleepCycleOptions: {
+          compilationPlanOverride: {
+            memories: [
+              {
+                id: "evt-manning-coffee",
+                type: "事件记录",
+                rel_path: "events/2026-11-10-manning-coffee.md",
+                category: "preference",
+                date: "2026-11-10",
+                status: "有效",
+                source_event_id: turnDay1.userEventId,
+                assertions: ["- 偏好([[people/user]]#咖啡, \"曼特宁手冲\")"],
+                frontstage_narrative: "今天和他就“我最近每天早晨都喝曼特宁手冲咖啡”聊了几句",
+              },
+            ],
+            rapport_rules: [],
+          },
+          autoGitCommit: false,
+        },
+      });
+
+      expect(hbSleep1.branch).toBe("sleep_cycle");
+      expect(hbSleep1.sleepCycleOutput?.dateStr).toBe("2026-11-10");
+      expect(hbSleep1.sleepCycleOutput?.compileResult.writtenFiles).toContain(
+        "events/2026-11-10-manning-coffee.md",
+      );
+      expect(env.db.getReflexState().last_sleep_event_id).toBe(
+        turnLateNight.assistantEventId,
+      );
+      expect(env.db.getUnsettledEventLogs().length).toBe(0);
+
+      // 验证 2026-11-10.md 完整落盘了睡前自省，而 2026-11-11.md 尚未被虚假占位
+      const day1JournalAfterSleep = fs.readFileSync(day1JournalPath, "utf8");
+      expect(day1JournalAfterSleep).toContain("## 睡前自省");
+      const day2JournalPath = path.join(env.memoryDir, "journal", "2026-11-11.md");
+      expect(fs.existsSync(day2JournalPath)).toBe(false);
+
+      // 15 分钟后（01:15）再次心跳：因昨日起居日已封底，同夜不再重复跑睡眠环
+      env.clock.advanceMinutes(15);
+      const hbFollowup = await env.engine.onHeartbeat();
+      expect(hbFollowup.branch).toBe("idle");
+
+      // 关键临界点：清晨 07:00（仍在 sleepLockEndHour 08:00 之前）用户提早醒来发消息！
+      // 因 2026-11-10 已完成睡前自省封底，07:00 必须归入 2026-11-11 新日记，绝不倒流污染 2026-11-10.md，且进入未结转游标队列
+      env.clock.advanceHours(5.75); // 01:15 + 5h45m = 07:00
+      expect(env.engine.getCircadianDateStr()).toBe("2026-11-11");
+      const turnEarlyMorning = await env.engine.onUserMessage("早安！今天早上七点我就起来背单词了");
+
+      expect(fs.existsSync(day2JournalPath)).toBe(true);
+      expect(fs.readFileSync(day2JournalPath, "utf8")).toContain("早上七点我就起来背单词了");
+      expect(fs.readFileSync(day1JournalPath, "utf8")).not.toContain("早上七点我就起来背单词了");
+
+      // 07:15 心跳（仍在 08:00 前）：即便今日已产生 07:00 热记事，因当夜已封底，绝不在清晨 07:15 误触发第二次睡眠环
+      env.clock.advanceMinutes(15);
+      const hbMorning = await env.engine.onHeartbeat();
+      expect(hbMorning.branch).toBe("idle");
+
+      // 07:00 的早起对话必须留在未结转游标队列中，绝不成为“记忆孤儿”
+      const unsettledAfterMorning = env.db.getUnsettledEventLogs();
+      expect(unsettledAfterMorning.some((e) => e.id === turnEarlyMorning.userEventId)).toBe(true);
+
+      // 次夜 01:00（2026-11-12 01:00）触发第 2 晚睡眠环：07:00 晨起事件被单调游标完整收入编译
+      env.clock.advanceHours(17.75); // 07:15 + 17h45m = 次日 01:00
+      const hbSleep2 = await env.engine.onHeartbeat({
+        sleepCycleOptions: {
+          compilationPlanOverride: {
+            memories: [
+              {
+                id: "evt-early-vocab",
+                type: "事件记录",
+                rel_path: "events/2026-11-11-early-vocab.md",
+                category: "schedule",
+                date: "2026-11-11",
+                status: "有效",
+                source_event_id: turnEarlyMorning.userEventId,
+                assertions: ["- 当前状态([[people/user]]#晨间习惯, \"早晨七点起床背单词\")"],
+                frontstage_narrative: "今天和他就“早安！今天早上七点我就起来背单词了”聊了几句",
+              },
+            ],
+            rapport_rules: [],
+          },
+          autoGitCommit: false,
+        },
+      });
+      expect(hbSleep2.branch).toBe("sleep_cycle");
+      expect(hbSleep2.sleepCycleOutput?.dateStr).toBe("2026-11-11");
+      expect(hbSleep2.sleepCycleOutput?.compileResult.writtenFiles).toContain(
+        "events/2026-11-11-early-vocab.md",
+      );
+      expect(env.db.getUnsettledEventLogs().length).toBe(0);
+
+      // 验证早鸟作息 (early_bird: 23:30~06:30) 午夜前 23:30 入睡封底后，跨过午夜 00:30 绝不倒流回昨日
+      env.engine.updatePersona({
+        name: "沈清",
+        archetype: "steady_anchor",
+        chronotype: "early_bird",
+      });
+      env.clock.setNow(new Date(2026, 10, 12, 23, 30, 0)); // 2026-11-12 23:30
+      const hbEarlyBirdSleep = await env.engine.onHeartbeat({
+        sleepCycleOptions: {
+          overrideReflectionText: "早鸟十一点半准时睡了。",
+          compilationPlanOverride: { memories: [], rapport_rules: [] },
+          autoGitCommit: false,
+        },
+      });
+      expect(hbEarlyBirdSleep.branch).toBe("sleep_cycle");
+      expect(hbEarlyBirdSleep.sleepCycleOutput?.dateStr).toBe("2026-11-12");
+
+      // 推进 1 小时至 2026-11-13 00:30：早鸟昨夜已封底，起居日直接为 2026-11-13
+      env.clock.advanceHours(1);
+      expect(env.engine.getCircadianDateStr()).toBe("2026-11-13");
+    } finally {
+      env.cleanup();
+    }
+  });
 });

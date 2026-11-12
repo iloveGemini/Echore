@@ -8,10 +8,12 @@ import {
 import type { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
+  type ChronotypeId,
   type CompilationPlan,
   CompilationPlanSchema,
   type CompiledMemorySpec,
   type EndocrineNightVerdict,
+  type EventLogRecord,
   type MemoryFrontmatter,
   type RapportRuleSpec,
 } from "../core/schemas.ts";
@@ -43,6 +45,9 @@ export interface NightlyCompilerParams {
   planOverride?: CompilationPlan;
   /** 是否允许显式取代受保护的钉子记忆（allow_forget: false 的非短期状态记忆 / 符号定义档），默认 false */
   allowSupersedeProtected?: boolean;
+  chronotype?: ChronotypeId;
+  /** 可选直接注入本轮睡眠待编译的增量事件集（默认由 db.getUnsettledEventLogs 游标获取） */
+  todaysEvents?: EventLogRecord[];
 }
 
 export type SlotConflictReason =
@@ -676,7 +681,9 @@ export async function runNightlyCompiler(
   }
 
   // 2. 获取记忆官结构化编译计划（优先使用 planOverride，否则调用 compiler 岗位模型）
-  const todaysEvents = db.getEventLogsByDate(dateStr);
+  const todaysEvents =
+    params.todaysEvents ??
+    db.getUnsettledEventLogs(dateStr, params.chronotype);
   const recentLogs =
     todaysEvents.length > 0 ? todaysEvents : db.getRecentEventLogs(10);
   const fallbackSourceLogId =
