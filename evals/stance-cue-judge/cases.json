@@ -1,0 +1,30 @@
+[
+  {
+    "id": "scj-01-direct-movie",
+    "lastAssistantReply": "最近院线上了几部节奏很慢的文艺片。",
+    "userMessage": "你也觉得那部电影特别好看对吧？",
+    "expected": "YES",
+    "rationale": "用户直接就「我」对电影的评价提问并施压表态"
+  },
+  {
+    "id": "scj-02-third-party-colleague",
+    "lastAssistantReply": "刚才聊到周末院线片单。",
+    "userMessage": "我同事觉得那部电影难看死了，你说是不是很离谱？",
+    "expected": "NO",
+    "rationale": "用户在转述同事评价并吐槽同事，并非要求「我」对电影选边站"
+  },
+  {
+    "id": "scj-03-anonymous-paraphrase",
+    "lastAssistantReply": "那部片子评分最近两极分化挺厉害的。",
+    "userMessage": "有人讲那部片子故弄玄虚特别烂，你说呢？",
+    "expected": "NO",
+    "rationale": "隐性第三方转述（无“同事/网上说”字眼），测试去除歧义正则后的真实语义判定"
+  },
+  {
+    "id": "scj-04-direct-hobby",
+    "lastAssistantReply": "我平日在家偶尔会挑黑胶听。",
+    "userMessage": "你是不是其实讨厌太吵的电子乐呀？",
+    "expected": "YES",
+    "rationale": "直接向「我」核实偏好态度"
+  }
+]

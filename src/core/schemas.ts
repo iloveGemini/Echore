@@ -122,6 +122,7 @@ export const MemoryFrontmatterSchema = z.object({
   source_event_id: z.string().optional(),
   category: MemoryCategorySchema,
   allow_forget: z.boolean().default(true),
+  when_to_recall: z.string().max(200).optional(),
 });
 export type MemoryFrontmatter = z.infer<typeof MemoryFrontmatterSchema>;
 
@@ -245,6 +246,7 @@ export const CompiledMemorySpecSchema = z.object({
   source_event_id: z.string().optional(),
   category: MemoryCategorySchema,
   allow_forget: z.boolean().default(true),
+  when_to_recall: z.string().optional(),
   assertions: z.array(z.string().min(1)).min(1),
   frontstage_narrative: z.string().optional(),
 });

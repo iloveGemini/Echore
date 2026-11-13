@@ -8,8 +8,11 @@ import {
 import type { EchoreDatabase, MemoryMetaRecord } from "../core/db.ts";
 import type { MemoryCategory, MemoryFrontmatter } from "../core/schemas.ts";
 import {
+  computeAuditFingerprint,
+  computeEmbeddingFingerprint,
   loadStructuredMemoryFiles,
   type ParsedMemoryFile,
+  parseStructuredMemoryFile,
 } from "./linter.ts";
 import type { RecalledMemoryItem } from "./recall.ts";
 
@@ -18,6 +21,17 @@ export const NAIL_MEMORY_STRENGTH = 0.90;
 export const ARCHIVAL_STRENGTH_THRESHOLD = 0.12;
 export const REACTIVATED_ARCHIVE_STRENGTH = 0.435;
 export const RECONSOLIDATION_BOOST = 0.05;
+
+export const PASSIVE_TRANSITION_STEP = 0.35;
+export const TRANSITION_DECAY_GAMMA = 0.95;
+export const TRANSITION_PRUNE_THRESHOLD = 0.05;
+export const TRANSITION_WINDOW_MS = 30 * 60 * 1000;
+export const TRANSITION_MIN_RECALL_WEIGHT = 0.20;
+
+export interface RecallBatchSnapshot {
+  ids: string[];
+  timestampMs: number;
+}
 
 /**
  * §4.2 分品类寿命周期 T_cat（单位：天）
@@ -97,10 +111,96 @@ export function writeUpdatedFrontmatter(
   }
   cleanData.category = frontmatter.category;
   cleanData.allow_forget = frontmatter.allow_forget;
+  if (frontmatter.when_to_recall !== undefined) {
+    cleanData.when_to_recall = frontmatter.when_to_recall;
+  }
 
   const trimmedBody = body.startsWith("\n") ? body : `\n${body}`;
   const serialized = matter.stringify(trimmedBody, cleanData);
   fs.writeFileSync(absPath, serialized, "utf8");
+}
+
+export function syncMemoryMetaForParsedFile(params: {
+  file: ParsedMemoryFile;
+  db: EchoreDatabase;
+  now: Date;
+}): void {
+  const { file: f, db, now } = params;
+  const nowIso = now.toISOString();
+  const existing = db.getMemoryMeta(f.frontmatter.id);
+  const auditFingerprint = computeAuditFingerprint(f.relPath, f.rawContent);
+  const embeddingFingerprint = computeEmbeddingFingerprint(
+    f.frontmatter.when_to_recall,
+    f.body,
+  );
+  if (!existing) {
+    const initialStrength = f.frontmatter.allow_forget
+      ? INITIAL_MEMORY_STRENGTH
+      : NAIL_MEMORY_STRENGTH;
+    const [y, m, d] = f.frontmatter.date.split("-").map(Number);
+    const defaultLastAccessed =
+      y && m && d
+        ? new Date(y, m - 1, d, 0, 0, 0).toISOString()
+        : f.frontmatter.date;
+    db.upsertMemoryMeta({
+      id: f.frontmatter.id,
+      path: f.relPath,
+      category: f.frontmatter.category,
+      status: f.frontmatter.status,
+      allow_forget: f.frontmatter.allow_forget,
+      strength: initialStrength,
+      access_count: 0,
+      last_accessed: defaultLastAccessed,
+      embedding_fingerprint: embeddingFingerprint,
+      updated_at: nowIso,
+    });
+  } else if (
+    existing.status !== f.frontmatter.status ||
+    existing.category !== f.frontmatter.category ||
+    existing.allow_forget !== f.frontmatter.allow_forget ||
+    existing.path !== f.relPath ||
+    existing.embedding_fingerprint !== embeddingFingerprint ||
+    (existing.audit_fingerprint !== undefined &&
+      existing.audit_fingerprint !== auditFingerprint)
+  ) {
+    const shouldClearEmbedding =
+      existing.embedding_fingerprint !== undefined &&
+      existing.embedding_fingerprint !== embeddingFingerprint;
+    const shouldClearAuditFingerprint =
+      existing.audit_fingerprint !== undefined &&
+      existing.audit_fingerprint !== auditFingerprint;
+    db.upsertMemoryMeta(
+      {
+        ...existing,
+        path: f.relPath,
+        category: f.frontmatter.category,
+        status: f.frontmatter.status,
+        allow_forget: f.frontmatter.allow_forget,
+        embedding: shouldClearEmbedding ? undefined : existing.embedding,
+        embedding_fingerprint: embeddingFingerprint,
+        audit_fingerprint: shouldClearAuditFingerprint
+          ? undefined
+          : existing.audit_fingerprint,
+        updated_at: nowIso,
+      },
+      {
+        clearEmbedding: shouldClearEmbedding,
+        clearAuditFingerprint: shouldClearAuditFingerprint,
+      },
+    );
+  }
+}
+
+export function syncSingleMemoryMetaFile(params: {
+  memoryDir: string;
+  relPath: string;
+  db: EchoreDatabase;
+  now: Date;
+}): ParsedMemoryFile | null {
+  const file = parseStructuredMemoryFile(params.memoryDir, params.relPath);
+  if (!file) return null;
+  syncMemoryMetaForParsedFile({ file, db: params.db, now: params.now });
+  return file;
 }
 
 /**
@@ -112,46 +212,10 @@ export function syncMemoryMetaFromFiles(params: {
   now: Date;
 }): ParsedMemoryFile[] {
   const { memoryDir, db, now } = params;
-  const nowIso = now.toISOString();
   const files = loadStructuredMemoryFiles(memoryDir);
 
   for (const f of files) {
-    const existing = db.getMemoryMeta(f.frontmatter.id);
-    if (!existing) {
-      const initialStrength = f.frontmatter.allow_forget
-        ? INITIAL_MEMORY_STRENGTH
-        : NAIL_MEMORY_STRENGTH;
-      const [y, m, d] = f.frontmatter.date.split("-").map(Number);
-      const defaultLastAccessed =
-        y && m && d
-          ? new Date(y, m - 1, d, 0, 0, 0).toISOString()
-          : f.frontmatter.date;
-      db.upsertMemoryMeta({
-        id: f.frontmatter.id,
-        path: f.relPath,
-        category: f.frontmatter.category,
-        status: f.frontmatter.status,
-        allow_forget: f.frontmatter.allow_forget,
-        strength: initialStrength,
-        access_count: 0,
-        last_accessed: defaultLastAccessed,
-        updated_at: nowIso,
-      });
-    } else if (
-      existing.status !== f.frontmatter.status ||
-      existing.category !== f.frontmatter.category ||
-      existing.allow_forget !== f.frontmatter.allow_forget ||
-      existing.path !== f.relPath
-    ) {
-      db.upsertMemoryMeta({
-        ...existing,
-        path: f.relPath,
-        category: f.frontmatter.category,
-        status: f.frontmatter.status,
-        allow_forget: f.frontmatter.allow_forget,
-        updated_at: nowIso,
-      });
-    }
+    syncMemoryMetaForParsedFile({ file: f, db, now });
   }
 
   return files;
@@ -271,6 +335,102 @@ export function reconsolidateRecalledMemories(params: {
 }
 
 /**
+ * Wave 5.2 时序共现注意力转移边（吸收自 Horon `record_transition` 结构形状并适配被动召回信号）：
+ * - 信号源：30min 滑窗内跨轮被动召回的非桶 A 实质批次（bucket_b_topic / bucket_c_graph）
+ * - 防污染：空档输入跳过；同轮批次内不互连；来源排除已出现在当前批或更近批中的记忆 ID
+ * - 常数说明：被动召回信号比 Horon 显式 `read_concept` (step=0.8) 噪声更高，故取 PASSIVE_TRANSITION_STEP = 0.35；
+ *   写入不设 1.0 硬封顶，依靠 γ^{relevance} (γ=0.95) 软衰减与 <0.05 死边剪枝自然收敛
+ */
+export function recordMemoryTransitions(params: {
+  db: EchoreDatabase;
+  recalledItems: RecalledMemoryItem[];
+  isIdleQuery: boolean;
+  recentBatches: readonly RecallBatchSnapshot[];
+  now: Date;
+}): RecallBatchSnapshot[] {
+  const { db, recalledItems, isIdleQuery, recentBatches, now } = params;
+  if (isIdleQuery) {
+    return [...recentBatches];
+  }
+
+  const currentBatchIds = Array.from(
+    new Set(
+      recalledItems
+        .filter(
+          (item) =>
+            item.bucket === "bucket_b_topic" ||
+            item.bucket === "bucket_c_graph",
+        )
+        .map((item) => item.id),
+    ),
+  );
+
+  if (currentBatchIds.length === 0) {
+    return [...recentBatches];
+  }
+
+  const nowMs = now.getTime();
+  const nowIso = now.toISOString();
+  let lastTimeMs = nowMs;
+
+  // 从最近一批往回追溯（相邻超过 30min 则断开会话转移链）
+  const activeHistoryBatches: RecallBatchSnapshot[] = [];
+  for (let i = recentBatches.length - 1; i >= 0; i--) {
+    const batch = recentBatches[i]!;
+    if (lastTimeMs - batch.timestampMs > TRANSITION_WINDOW_MS) {
+      break;
+    }
+    lastTimeMs = batch.timestampMs;
+    activeHistoryBatches.push(batch);
+  }
+
+  const usedIds = new Set<string>(currentBatchIds);
+  const sources: Array<{ fromId: string; relevance: number }> = [];
+  let depth = 0;
+
+  for (const batch of activeHistoryBatches) {
+    const fresh = batch.ids.filter((id) => !usedIds.has(id));
+    if (fresh.length === 0) {
+      continue;
+    }
+    for (const id of fresh) {
+      usedIds.add(id);
+    }
+    const relevance = Math.pow(0.5, depth);
+    for (const fromId of fresh) {
+      sources.push({ fromId, relevance });
+    }
+    depth += 1;
+    if (depth === 3) {
+      break;
+    }
+  }
+
+  if (sources.length > 0) {
+    const deltaBase = PASSIVE_TRANSITION_STEP / currentBatchIds.length;
+    const applyTransitionsTx = db.sqlite.transaction(() => {
+      for (const { fromId, relevance } of sources) {
+        db.decayAndPruneTransitionsFrom(
+          fromId,
+          Math.pow(TRANSITION_DECAY_GAMMA, relevance),
+          TRANSITION_PRUNE_THRESHOLD,
+        );
+        const delta = deltaBase * relevance;
+        for (const toId of currentBatchIds) {
+          db.incrementMemoryTransition(fromId, toId, delta, nowIso);
+        }
+      }
+    });
+    applyTransitionsTx();
+  }
+
+  // 保留 30min 窗内的最近批次（含本轮），供后续轮次追溯
+  const kept = activeHistoryBatches.reverse();
+  kept.push({ ids: currentBatchIds, timestampMs: nowMs });
+  return kept.slice(-6);
+}
+
+/**
  * §4.2 & §4.4 分品类定步长指数衰减与 `status: 已沉底` 归档门
  * - 免死金牌 (`allow_forget: false`) 直接跳过衰减与归档
  * - 零访问记忆在满 t = T_cat 天时，强度从 0.75 精准衰减至 0.12 归档门阈值
@@ -281,8 +441,9 @@ export function runDailyMemoryDecayAndArchive(params: {
   db: EchoreDatabase;
   now: Date;
   elapsedDays?: number;
+  sleepDate?: string;
 }): DecayArchiveReport {
-  const { memoryDir, db, now, elapsedDays = 1 } = params;
+  const { memoryDir, db, now, elapsedDays = 1, sleepDate } = params;
   const nowIso = now.toISOString();
   const dateStr = formatLocalDateStr(now);
   const steps = Math.max(1, elapsedDays);
@@ -368,6 +529,18 @@ export function runDailyMemoryDecayAndArchive(params: {
 
     if (shouldArchive) {
       const absPath = path.join(memoryDir, relPath);
+      if (sleepDate) {
+        const currentDiskContent = fs.existsSync(absPath)
+          ? fs.readFileSync(absPath, "utf8")
+          : null;
+        db.captureMemorySnapshotOnWrite({
+          sleepDate,
+          memoryId: frontmatter.id,
+          relPath,
+          currentDiskContent,
+          createdAtIso: nowIso,
+        });
+      }
       const updatedFm: MemoryFrontmatter = {
         ...frontmatter,
         status: "已沉底",

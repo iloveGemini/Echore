@@ -27,7 +27,26 @@ export interface MemoryMetaRecord {
   access_count: number;
   last_accessed: string;
   embedding?: number[];
+  embedding_fingerprint?: string;
+  audit_fingerprint?: string;
   updated_at: string;
+}
+
+export interface MemoryTransitionRecord {
+  from_memory_id: string;
+  to_memory_id: string;
+  weight: number;
+  updated_at: string;
+}
+
+export interface MemorySnapshotRecord {
+  id: number;
+  sleep_date: string;
+  memory_id: string;
+  rel_path: string;
+  original_content: string | null;
+  is_creation: boolean;
+  created_at: string;
 }
 
 export function resolveDataDir(explicitDir?: string): string {
@@ -128,8 +147,35 @@ export class EchoreDatabase {
         access_count INTEGER NOT NULL DEFAULT 0,
         last_accessed TEXT NOT NULL,
         embedding_json TEXT,
+        embedding_fingerprint TEXT,
+        audit_fingerprint TEXT,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS memory_transitions (
+        from_memory_id TEXT NOT NULL,
+        to_memory_id TEXT NOT NULL,
+        weight REAL NOT NULL DEFAULT 0.0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (from_memory_id, to_memory_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_transitions_from
+        ON memory_transitions(from_memory_id, weight DESC);
+
+      CREATE TABLE IF NOT EXISTS memory_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sleep_date TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        rel_path TEXT NOT NULL,
+        original_content TEXT,
+        is_creation INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(sleep_date, memory_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_snapshots_date
+        ON memory_snapshots(sleep_date);
     `);
 
     const reflexRow = this.sqlite
@@ -174,6 +220,20 @@ export class EchoreDatabase {
     if (!reflexCols.some((c) => c.name === "last_sleep_event_id")) {
       this.sqlite.exec(
         "ALTER TABLE reflex_state ADD COLUMN last_sleep_event_id TEXT;",
+      );
+    }
+
+    const memoryMetaCols = this.sqlite
+      .query("PRAGMA table_info(memory_meta)")
+      .all() as Array<{ name: string }>;
+    if (!memoryMetaCols.some((c) => c.name === "embedding_fingerprint")) {
+      this.sqlite.exec(
+        "ALTER TABLE memory_meta ADD COLUMN embedding_fingerprint TEXT;",
+      );
+    }
+    if (!memoryMetaCols.some((c) => c.name === "audit_fingerprint")) {
+      this.sqlite.exec(
+        "ALTER TABLE memory_meta ADD COLUMN audit_fingerprint TEXT;",
       );
     }
   }
@@ -674,14 +734,23 @@ export class EchoreDatabase {
     );
   }
 
-  upsertMemoryMeta(meta: MemoryMetaRecord): void {
+  upsertMemoryMeta(
+    meta: MemoryMetaRecord,
+    options?: { clearEmbedding?: boolean; clearAuditFingerprint?: boolean },
+  ): void {
     this.sqlite
       .query(`DELETE FROM memory_meta WHERE path = ? AND id != ?`)
       .run(meta.path, meta.id);
+    const embeddingUpdateSql = options?.clearEmbedding
+      ? `excluded.embedding_json`
+      : `COALESCE(excluded.embedding_json, memory_meta.embedding_json)`;
+    const auditFingerprintUpdateSql = options?.clearAuditFingerprint
+      ? `excluded.audit_fingerprint`
+      : `COALESCE(excluded.audit_fingerprint, memory_meta.audit_fingerprint)`;
     this.sqlite
       .query(
-        `INSERT INTO memory_meta (id, path, category, status, allow_forget, strength, access_count, last_accessed, embedding_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO memory_meta (id, path, category, status, allow_forget, strength, access_count, last_accessed, embedding_json, embedding_fingerprint, audit_fingerprint, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            path = excluded.path,
            category = excluded.category,
@@ -690,7 +759,9 @@ export class EchoreDatabase {
            strength = excluded.strength,
            access_count = excluded.access_count,
            last_accessed = excluded.last_accessed,
-           embedding_json = COALESCE(excluded.embedding_json, memory_meta.embedding_json),
+           embedding_json = ${embeddingUpdateSql},
+           embedding_fingerprint = COALESCE(excluded.embedding_fingerprint, memory_meta.embedding_fingerprint),
+           audit_fingerprint = ${auditFingerprintUpdateSql},
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -703,8 +774,20 @@ export class EchoreDatabase {
         meta.access_count,
         meta.last_accessed,
         meta.embedding ? JSON.stringify(meta.embedding) : null,
+        meta.embedding_fingerprint ?? null,
+        meta.audit_fingerprint ?? null,
         meta.updated_at,
       );
+  }
+
+  setMemoryAuditFingerprint(id: string, auditFingerprint: string | null): void {
+    this.sqlite
+      .query(`UPDATE memory_meta SET audit_fingerprint = ? WHERE id = ?`)
+      .run(auditFingerprint, id);
+  }
+
+  deleteMemoryMeta(id: string): void {
+    this.sqlite.query(`DELETE FROM memory_meta WHERE id = ?`).run(id);
   }
 
   getMemoryMeta(id: string): MemoryMetaRecord | null {
@@ -721,6 +804,8 @@ export class EchoreDatabase {
           access_count: number;
           last_accessed: string;
           embedding_json: string | null;
+          embedding_fingerprint: string | null;
+          audit_fingerprint: string | null;
           updated_at: string;
         }
       | null;
@@ -735,6 +820,8 @@ export class EchoreDatabase {
       access_count: row.access_count,
       last_accessed: row.last_accessed,
       embedding: row.embedding_json ? JSON.parse(row.embedding_json) : undefined,
+      embedding_fingerprint: row.embedding_fingerprint ?? undefined,
+      audit_fingerprint: row.audit_fingerprint ?? undefined,
       updated_at: row.updated_at,
     };
   }
@@ -752,6 +839,8 @@ export class EchoreDatabase {
       access_count: number;
       last_accessed: string;
       embedding_json: string | null;
+      embedding_fingerprint: string | null;
+      audit_fingerprint: string | null;
       updated_at: string;
     }>;
     return rows.map((row) => ({
@@ -764,8 +853,189 @@ export class EchoreDatabase {
       access_count: row.access_count,
       last_accessed: row.last_accessed,
       embedding: row.embedding_json ? JSON.parse(row.embedding_json) : undefined,
+      embedding_fingerprint: row.embedding_fingerprint ?? undefined,
+      audit_fingerprint: row.audit_fingerprint ?? undefined,
       updated_at: row.updated_at,
     }));
+  }
+
+  decayAndPruneTransitionsFrom(
+    fromMemoryId: string,
+    decayFactor: number,
+    pruneThreshold: number,
+  ): void {
+    this.sqlite
+      .query(
+        `UPDATE memory_transitions
+         SET weight = weight * ?
+         WHERE from_memory_id = ?`,
+      )
+      .run(decayFactor, fromMemoryId);
+    this.sqlite
+      .query(
+        `DELETE FROM memory_transitions
+         WHERE from_memory_id = ? AND weight < ?`,
+      )
+      .run(fromMemoryId, pruneThreshold);
+  }
+
+  incrementMemoryTransition(
+    fromMemoryId: string,
+    toMemoryId: string,
+    delta: number,
+    updatedAtIso: string,
+  ): void {
+    if (fromMemoryId === toMemoryId || delta <= 0) return;
+    this.sqlite
+      .query(
+        `INSERT INTO memory_transitions (from_memory_id, to_memory_id, weight, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(from_memory_id, to_memory_id) DO UPDATE SET
+           weight = memory_transitions.weight + excluded.weight,
+           updated_at = excluded.updated_at`,
+      )
+      .run(fromMemoryId, toMemoryId, delta, updatedAtIso);
+  }
+
+  getTopMemoryTransitions(
+    fromMemoryId: string,
+    options?: { minWeight?: number; limit?: number },
+  ): MemoryTransitionRecord[] {
+    const minWeight = options?.minWeight ?? 0.2;
+    const limit = options?.limit ?? 3;
+    return this.sqlite
+      .query(
+        `SELECT from_memory_id, to_memory_id, weight, updated_at
+         FROM memory_transitions
+         WHERE from_memory_id = ? AND weight >= ?
+         ORDER BY weight DESC, to_memory_id ASC
+         LIMIT ?`,
+      )
+      .all(fromMemoryId, minWeight, limit) as MemoryTransitionRecord[];
+  }
+
+  listTransitionsFrom(fromMemoryId: string): MemoryTransitionRecord[] {
+    return this.sqlite
+      .query(
+        `SELECT from_memory_id, to_memory_id, weight, updated_at
+         FROM memory_transitions
+         WHERE from_memory_id = ?
+         ORDER BY weight DESC, to_memory_id ASC`,
+      )
+      .all(fromMemoryId) as MemoryTransitionRecord[];
+  }
+
+  captureMemorySnapshotOnWrite(params: {
+    sleepDate: string;
+    memoryId: string;
+    relPath: string;
+    currentDiskContent: string | null;
+    createdAtIso?: string;
+  }): boolean {
+    const isCreation = params.currentDiskContent === null ? 1 : 0;
+    const createdAt = params.createdAtIso ?? this.clock.nowIso();
+    const res = this.sqlite
+      .query(
+        `INSERT OR IGNORE INTO memory_snapshots (sleep_date, memory_id, rel_path, original_content, is_creation, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.sleepDate,
+        params.memoryId,
+        params.relPath,
+        params.currentDiskContent,
+        isCreation,
+        createdAt,
+      );
+    return res.changes > 0;
+  }
+
+  getMemorySnapshot(
+    sleepDate: string,
+    memoryId: string,
+  ): MemorySnapshotRecord | null {
+    const row = this.sqlite
+      .query(
+        `SELECT id, sleep_date, memory_id, rel_path, original_content, is_creation, created_at
+         FROM memory_snapshots
+         WHERE sleep_date = ? AND memory_id = ?`,
+      )
+      .get(sleepDate, memoryId) as
+      | {
+          id: number;
+          sleep_date: string;
+          memory_id: string;
+          rel_path: string;
+          original_content: string | null;
+          is_creation: number;
+          created_at: string;
+        }
+      | null;
+    if (!row) return null;
+    return {
+      ...row,
+      is_creation: Boolean(row.is_creation),
+    };
+  }
+
+  listMemorySnapshots(sleepDate?: string): MemorySnapshotRecord[] {
+    const rows = (
+      sleepDate
+        ? this.sqlite
+            .query(
+              `SELECT id, sleep_date, memory_id, rel_path, original_content, is_creation, created_at
+               FROM memory_snapshots
+               WHERE sleep_date = ?
+               ORDER BY id ASC`,
+            )
+            .all(sleepDate)
+        : this.sqlite
+            .query(
+              `SELECT id, sleep_date, memory_id, rel_path, original_content, is_creation, created_at
+               FROM memory_snapshots
+               ORDER BY sleep_date DESC, id ASC`,
+            )
+            .all()
+    ) as Array<{
+      id: number;
+      sleep_date: string;
+      memory_id: string;
+      rel_path: string;
+      original_content: string | null;
+      is_creation: number;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      is_creation: Boolean(row.is_creation),
+    }));
+  }
+
+  deleteMemorySnapshot(sleepDate: string, memoryId: string): void {
+    this.sqlite
+      .query(
+        `DELETE FROM memory_snapshots WHERE sleep_date = ? AND memory_id = ?`,
+      )
+      .run(sleepDate, memoryId);
+  }
+
+  pruneOldMemorySnapshots(keepDays = 7): number {
+    if (keepDays <= 0) {
+      const res = this.sqlite.query(`DELETE FROM memory_snapshots`).run();
+      return res.changes;
+    }
+    const res = this.sqlite
+      .query(
+        `DELETE FROM memory_snapshots
+         WHERE sleep_date NOT IN (
+           SELECT DISTINCT sleep_date
+           FROM memory_snapshots
+           ORDER BY sleep_date DESC
+           LIMIT ?
+         )`,
+      )
+      .run(keepDays);
+    return res.changes;
   }
 
   close(): void {

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "mc-01-when-to-recall-specificity",
+    "dateStr": "2026-11-13",
+    "coldReflection": "今天陪他去医院把固定脚踝的弹力绷带拆了，医生嘱咐这两周先别跑跳。",
+    "todaysEvents": [
+      {
+        "id": "log-20261113-1600-001",
+        "role": "user",
+        "speaker": "user",
+        "content": "今天去医院把固定脚踝的弹力绷带拆了，医生让我两周内先别做剧烈运动"
+      }
+    ],
+    "existingActiveSummary": "- id: evt-ankle-sprain | symbol: [[events/2026-11-01-ankle-sprain]] | status: 有效 | body: - 当前状态([[people/user]]#脚踝, 扭伤打弹力绷带固定中)",
+    "feedbackTriplets": "- [log-20261113-1600-001] 他说: \"今天去医院把固定脚踝的弹力绷带拆了，医生让我两周内先别做剧烈运动\" -> 我回: \"总算能透口气了，这两周走路先稳着点\" -> （未再接话）",
+    "expectations": {
+      "mustHaveValidSourceEventId": true,
+      "mustSupersedeId": "evt-ankle-sprain",
+      "mustPassWhenToRecallGate": true
+    }
+  },
+  {
+    "id": "mc-02-z-gate-temporary-tantrum",
+    "dateStr": "2026-11-13",
+    "coldReflection": "今晚他加班到十点半烦躁地说以后再也不喝黑咖啡了，但我记得他平时明明离不了手冲。",
+    "todaysEvents": [
+      {
+        "id": "log-20261113-2230-002",
+        "role": "user",
+        "speaker": "user",
+        "content": "今天加完班胃好难受，烦死了我以后再也不碰黑咖啡了"
+      }
+    ],
+    "existingActiveSummary": "- id: evt-coffee-pref | symbol: [[events/2026-10-15-coffee-pref]] | status: 有效 | body: - 偏好([[people/user]]#咖啡, 每天早上必喝深烘手冲黑咖啡)",
+    "feedbackTriplets": "- [log-20261113-2230-002] 他说: \"今天加完班胃好难受，烦死了我以后再也不碰黑咖啡了\" -> 我回: \"气话不算数，先把胃暖一暖\" -> （未再接话）",
+    "expectations": {
+      "mustHaveValidSourceEventId": true,
+      "mustNotSupersedeId": "evt-coffee-pref",
+      "mustPassWhenToRecallGate": false
+    }
+  }
+]

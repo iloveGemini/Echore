@@ -20,7 +20,8 @@ export type PromptFileName =
   | "bedtime-reflection.md"
   | "silent-worker.md"
   | "endocrine-pulse.md"
-  | "memory-compiler.md";
+  | "memory-compiler.md"
+  | "stance-cue-judge.md";
 
 export interface PromptDoc {
   name: string;

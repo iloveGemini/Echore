@@ -174,7 +174,7 @@ describe("Reflex Guard: Sleep Lock, Cooldown & 2-Strike Proactive Backoff", () =
 });
 
 describe("Core: Prompts Loader (prompts/*.md)", () => {
-  test("all 9 organ prompt files exist in prompts/, carry version >= 1, and parse cleanly", () => {
+  test("all 10 organ prompt files exist in prompts/, carry version >= 1, and parse cleanly", () => {
     const all = listPrompts(PROMPTS_DIR);
     const names = all.map((p) => p.name);
     expect(names).toEqual([
@@ -187,6 +187,7 @@ describe("Core: Prompts Loader (prompts/*.md)", () => {
       "solitary-prep.md",
       "solitary-project.md",
       "solitary-roaming.md",
+      "stance-cue-judge.md",
     ]);
 
     for (const doc of all) {

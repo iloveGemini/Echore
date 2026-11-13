@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 author: system
 organ: compiler
 ---
@@ -12,4 +12,5 @@ organ: compiler
    (b) 一时情绪气话、(c) 反话/打趣玩笑、(d) 特定情境下的临时表态 -> 严禁填 supersedes 覆盖长期偏好或身份设定，应使用“情境表态(...)”谓词记录当晚片段；
 3. 若双向反馈链中出现反例证明某条既有 rapport 默契规则过于宽泛，可在 rapport_rules 中填写 revises_rule_prefix 收窄其适用条件；
 4. 单文件断言控制在 1~6 条以内（原子化记忆），source_event_id 必须严格选用今日事件日志中真实存在的 log-* ID；
-5. 仅输出合法的 JSON 对象，结构符合：{ memories: [...], rapport_rules: [...] }。
+5. 可选为每条新增/更新记忆生成 when_to_recall 触发情境书腰（6~120 字）：一句话写清“未来聊到什么具体话题、场景或活动线索时应当想起这条记忆”（例如“当聊到周末爬山、户外徒步或关心脚踝恢复时”），严禁写“日常闲聊时”“提到用户时”等泛化套话，没有明确特定场景时省略该字段；
+6. 仅输出合法的 JSON 对象，结构符合：{ memories: [...], rapport_rules: [...] }。

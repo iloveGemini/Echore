@@ -34,6 +34,7 @@ import {
   type ParsedMemoryFile,
   runMemoryLinter,
 } from "./linter.ts";
+import { findUniqueNormalizedMatchRange } from "./text-patch.ts";
 
 export interface NightlyCompilerParams {
   memoryDir: string;
@@ -118,6 +119,32 @@ function sanitizeSlug(raw: string): string {
   return cleaned || "item";
 }
 
+const GENERIC_WHEN_TO_RECALL_FILLER_RE =
+  /日常闲聊|平时聊天|随便聊天|普通聊天|一般聊天|日常对话|平时对话|任何时候|每次对话|任何场景|日常交流|提到用户|聊到生活|日常生活中|日常生活|日常|平时|随便|普通|一般|聊天|闲聊|对话|说话|时候|生活|用户|聊到|提到|谈到|说起|问起|关于|如果|每当|相关|话题|内容|事情/gu;
+const GENERIC_WHEN_TO_RECALL_EDGE_RE =
+  /^(?:当|若|在)+|(?:的时候|之时|之际|的话|时)+$/gu;
+
+/**
+ * Wave 5.1 反泛化书腰质量门：
+ * 长度须在 [6, 120] 字之间，且剥离套话/边界虚词后有效实词字符数 >= 4（不误伤词中“当/时/的/和”等单字）；不达标返回 undefined（宁缺毋滥）。
+ */
+export function sanitizeWhenToRecall(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  if (cleaned.length < 6 || cleaned.length > 120) {
+    return undefined;
+  }
+  const meaningful = cleaned
+    .replace(GENERIC_WHEN_TO_RECALL_EDGE_RE, "")
+    .replace(GENERIC_WHEN_TO_RECALL_FILLER_RE, "")
+    .replace(GENERIC_WHEN_TO_RECALL_EDGE_RE, "")
+    .replace(/[\p{P}\p{S}\s]+/gu, "");
+  if (Array.from(meaningful).length < 4) {
+    return undefined;
+  }
+  return cleaned;
+}
+
 function escapePredicateText(text: string): string {
   return text
     .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
@@ -169,8 +196,21 @@ function writeCompiledMarkdownFile(params: {
   frontmatter: MemoryFrontmatter;
   assertions: string[];
   frontstageNarrative: string;
+  db?: EchoreDatabase;
+  sleepDate?: string;
 }): void {
   const absPath = path.join(params.memoryDir, params.relPath);
+  if (params.db && params.sleepDate) {
+    const currentDiskContent = fs.existsSync(absPath)
+      ? fs.readFileSync(absPath, "utf8")
+      : null;
+    params.db.captureMemorySnapshotOnWrite({
+      sleepDate: params.sleepDate,
+      memoryId: params.frontmatter.id,
+      relPath: params.relPath,
+      currentDiskContent,
+    });
+  }
   fs.mkdirSync(path.dirname(absPath), { recursive: true });
   const body = formatCompiledMarkdownBody(
     params.assertions,
@@ -187,14 +227,19 @@ export function appendRapportRulesToFile(params: {
   db: EchoreDatabase;
   rules: RapportRuleSpec[];
   now: Date;
+  sleepDate?: string;
 }): string[] {
-  const { memoryDir, db, rules, now } = params;
+  const { memoryDir, db, rules, now, sleepDate } = params;
   if (rules.length === 0) return [];
 
   const rapportPath = path.join(memoryDir, "implicit", "rapport.md");
+  const initialDiskContent = fs.existsSync(rapportPath)
+    ? fs.readFileSync(rapportPath, "utf8")
+    : null;
   fs.mkdirSync(path.dirname(rapportPath), { recursive: true });
-  if (!fs.existsSync(rapportPath)) {
-    const initRapport = [
+  let raw =
+    initialDiskContent ??
+    [
       "---",
       "id: imp-rapport",
       "type: 内隐默契",
@@ -211,10 +256,7 @@ export function appendRapportRulesToFile(params: {
       "## 结痂雷区",
       "",
     ].join("\n");
-    fs.writeFileSync(rapportPath, initRapport, "utf8");
-  }
 
-  let raw = fs.readFileSync(rapportPath, "utf8");
   const added: string[] = [];
 
   for (const rule of rules) {
@@ -229,21 +271,56 @@ export function appendRapportRulesToFile(params: {
       .trim();
     const formattedLine = `- ${baseLine} [src: ${rule.source_event_id}]`;
 
-    // Wave 4.2: 若指定了 revises_rule_prefix（默契反例条件收窄/分化），就地替换原规则行并更新 [src: log-xxx]
+    // Wave 4.2 + Wave 6.3: 若指定了 revises_rule_prefix（默契反例条件收窄/分化），就地替换原规则行并更新 [src: log-xxx]
     if (rule.revises_rule_prefix?.trim()) {
       const targetPrefix = rule.revises_rule_prefix
         .trim()
         .replace(/^-\s*/, "");
-      const lines = raw.split(/\r?\n/);
-      const matchIdx = lines.findIndex((l) => {
-        const t = l.trim();
-        return t.startsWith("- ") && t.includes(targetPrefix);
-      });
-      if (matchIdx !== -1) {
-        lines[matchIdx] = formattedLine;
-        raw = lines.join("\n");
+      const exactSpans: Array<{ lineStart: number; lineEnd: number }> = [];
+      let scanPos = 0;
+      while (scanPos <= raw.length) {
+        const nextNl = raw.indexOf("\n", scanPos);
+        const rawLineEnd = nextNl === -1 ? raw.length : nextNl;
+        const lineEnd =
+          rawLineEnd > scanPos && raw[rawLineEnd - 1] === "\r"
+            ? rawLineEnd - 1
+            : rawLineEnd;
+        const t = raw.slice(scanPos, lineEnd).trim();
+        if (t.startsWith("- ") && t.includes(targetPrefix)) {
+          exactSpans.push({ lineStart: scanPos, lineEnd });
+        }
+        if (nextNl === -1) break;
+        scanPos = nextNl + 1;
+      }
+
+      if (exactSpans.length === 1) {
+        const hit = exactSpans[0]!;
+        raw = `${raw.slice(0, hit.lineStart)}${formattedLine}${raw.slice(hit.lineEnd)}`;
         added.push(formattedLine);
         continue;
+      }
+
+      if (exactSpans.length >= 2) {
+        continue;
+      }
+
+      // 精确匹配失败时走 Wave 6.3 归一化唯一区间定位（不改写全文 NFC / 保护补丁外字节）
+      const normRange = findUniqueNormalizedMatchRange(raw, targetPrefix);
+      if (normRange) {
+        const prevNl = raw.lastIndexOf("\n", normRange.start - 1);
+        const lineStart = prevNl === -1 ? 0 : prevNl + 1;
+        const nextNl = raw.indexOf("\n", normRange.end);
+        const rawLineEnd = nextNl === -1 ? raw.length : nextNl;
+        const lineEnd =
+          rawLineEnd > lineStart && raw[rawLineEnd - 1] === "\r"
+            ? rawLineEnd - 1
+            : rawLineEnd;
+        const targetLine = raw.slice(lineStart, lineEnd);
+        if (targetLine.trimStart().startsWith("- ")) {
+          raw = `${raw.slice(0, lineStart)}${formattedLine}${raw.slice(lineEnd)}`;
+          added.push(formattedLine);
+          continue;
+        }
       }
     }
 
@@ -263,6 +340,14 @@ export function appendRapportRulesToFile(params: {
   }
 
   if (added.length > 0) {
+    if (sleepDate) {
+      db.captureMemorySnapshotOnWrite({
+        sleepDate,
+        memoryId: "imp-rapport",
+        relPath: "implicit/rapport.md",
+        currentDiskContent: initialDiskContent,
+      });
+    }
     const parsed = matter(raw);
     const updatedFm: MemoryFrontmatter = {
       id: String(parsed.data.id ?? "imp-rapport"),
@@ -284,8 +369,15 @@ export function appendRapportRulesToFile(params: {
 export function reconcileSynchronicLinksToInactiveFiles(params: {
   memoryDir: string;
   supersededReplacementMap?: Map<string, string>; // oldSymbolKey -> newSymbolKey
+  db?: EchoreDatabase;
+  sleepDate?: string;
 }): void {
-  const { memoryDir, supersededReplacementMap = new Map() } = params;
+  const {
+    memoryDir,
+    supersededReplacementMap = new Map(),
+    db,
+    sleepDate,
+  } = params;
   const files = loadStructuredMemoryFiles(memoryDir);
   const bySymbol = new Map<string, ParsedMemoryFile>();
   for (const f of files) {
@@ -359,6 +451,14 @@ export function reconcileSynchronicLinksToInactiveFiles(params: {
 
     if (fileModified) {
       const absPath = path.join(memoryDir, f.relPath);
+      if (db && sleepDate) {
+        db.captureMemorySnapshotOnWrite({
+          sleepDate,
+          memoryId: f.frontmatter.id,
+          relPath: f.relPath,
+          currentDiskContent: f.rawContent,
+        });
+      }
       writeUpdatedFrontmatter(absPath, f.frontmatter, updatedLines.join("\n"));
     }
   }
@@ -544,6 +644,8 @@ export async function runNightlyCompiler(
             `- 身份([[people/${defaultPerson}]]#角色, ${defaultPerson === "self" ? "住户自身" : "主互动伙伴"})`,
           ],
           frontstageNarrative: effectiveReflection,
+          db,
+          sleepDate: dateStr,
         });
         writtenFiles.push(personRelPath);
       }
@@ -604,6 +706,8 @@ export async function runNightlyCompiler(
       frontmatter: fm,
       assertions,
       frontstageNarrative: narrativeToUse,
+      db,
+      sleepDate: dateStr,
     });
 
     writtenFiles.push(relPath);
@@ -661,6 +765,12 @@ export async function runNightlyCompiler(
 
       if (changed) {
         const absPath = path.join(memoryDir, f.relPath);
+        db.captureMemorySnapshotOnWrite({
+          sleepDate: dateStr,
+          memoryId: f.frontmatter.id,
+          relPath: f.relPath,
+          currentDiskContent: f.rawContent,
+        });
         const updatedFm: MemoryFrontmatter = {
           ...f.frontmatter,
           tier: nextTier,
@@ -789,6 +899,8 @@ export async function runNightlyCompiler(
               frontmatter: personFm,
               assertions: [`- 身份([[${refSym}]]#关系, 相关人物)`],
               frontstageNarrative: effectiveReflection,
+              db,
+              sleepDate: dateStr,
             });
             writtenFiles.push(personRelPath);
             existingBySymbol.set(refSym, {
@@ -918,6 +1030,12 @@ export async function runNightlyCompiler(
       const oldFile = existingById.get(oldId);
       if (oldFile && oldFile.frontmatter.status !== "已取代") {
         const oldAbsPath = path.join(memoryDir, oldFile.relPath);
+        db.captureMemorySnapshotOnWrite({
+          sleepDate: dateStr,
+          memoryId: oldFile.frontmatter.id,
+          relPath: oldFile.relPath,
+          currentDiskContent: oldFile.rawContent,
+        });
         const updatedOldFm: MemoryFrontmatter = {
           ...oldFile.frontmatter,
           status: "已取代",
@@ -939,6 +1057,8 @@ export async function runNightlyCompiler(
       ? candidateSpecNarrative
       : effectiveReflection;
 
+    const sanitizedCue = sanitizeWhenToRecall(spec.when_to_recall);
+
     const compiledFm: MemoryFrontmatter = {
       id: spec.id,
       type: spec.type,
@@ -958,6 +1078,7 @@ export async function runNightlyCompiler(
         spec.tier === "scar"
           ? false
           : spec.allow_forget,
+      ...(sanitizedCue ? { when_to_recall: sanitizedCue } : {}),
     };
 
     writeCompiledMarkdownFile({
@@ -966,6 +1087,8 @@ export async function runNightlyCompiler(
       frontmatter: compiledFm,
       assertions: guardedAssertions,
       frontstageNarrative: narrativeToWrite,
+      db,
+      sleepDate: dateStr,
     });
 
     const newParsedFile: ParsedMemoryFile = {
@@ -1010,6 +1133,7 @@ export async function runNightlyCompiler(
     db,
     rules: allRapportRules,
     now,
+    sleepDate: dateStr,
   });
   if (addedRules.length > 0) {
     addedRapportRules.push(...addedRules);
@@ -1020,6 +1144,8 @@ export async function runNightlyCompiler(
   reconcileSynchronicLinksToInactiveFiles({
     memoryDir,
     supersededReplacementMap,
+    db,
+    sleepDate: dateStr,
   });
 
   // 6. 同步 SQLite `memory_meta` 并执行 L1~L7 体检

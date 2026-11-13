@@ -4,6 +4,7 @@ import {
   localCalendarDaysBetween,
 } from "../core/clock.ts";
 import type { EchoreDatabase } from "../core/db.ts";
+import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
   type ConcernRecord,
@@ -12,6 +13,7 @@ import {
   type MemoryType,
 } from "../core/schemas.ts";
 import { extractHotEntriesForDate } from "../frontstage/journal.ts";
+import type { OrganModelRouter } from "../llm/router.ts";
 import {
   loadStructuredMemoryFiles,
   type ParsedMemoryFile,
@@ -72,6 +74,14 @@ export const HUB_DEGREE_THRESHOLD = 5;
 export const DIACHRONIC_EDGE_DAMPING = 0.40;
 export const RRF_DEFAULT_K = 60;
 export const STANCE_ANCHOR_BOOST = 0.22;
+export const STANCE_CUE_VERIFY_TIMEOUT_MS = 1200;
+export const TRANSITION_RECALL_MIN_WEIGHT = 0.20;
+export const TRANSITION_RECALL_COEFF = 0.70;
+
+export type StanceBinaryVerifier = (input: {
+  userMessage: string;
+  lastAssistantReply: string;
+}) => Promise<boolean>;
 
 const STANCE_OPINION_RE =
   /觉得|认为|看法|喜欢|讨厌|烦|无聊|没(?:什么)?意思|好看|难看|故弄玄虚|烂|吹过头|蠢|没劲|过誉|矫情/;
@@ -213,6 +223,91 @@ export function isStanceCue(query: string): boolean {
   const trimmed = query.trim();
   if (!trimmed) return false;
   return STANCE_OPINION_RE.test(trimmed) && STANCE_PRESSURE_RE.test(trimmed);
+}
+
+/**
+ * Wave 6.1 两段式门控（Stage 1 异步二元复筛）：
+ * - Stage 0 未命中 isStanceCue() 直接返回 false（零延迟）；
+ * - Stage 0 命中后不再设歧义正则预筛，全部送入轻量二元判定（钉死走 `endocrine` 路由槽位或测试桩）；
+ * - 超时（默认 1200ms）或异常时安全降级返回 true（回退 Stage 0 正则结果）。
+ */
+export async function verifyStanceCueWithOrgan(params: {
+  userMessage: string;
+  lastAssistantReply?: string;
+  router?: OrganModelRouter;
+  verifier?: StanceBinaryVerifier;
+  timeoutMs?: number;
+  promptsDir?: string;
+}): Promise<boolean> {
+  const {
+    userMessage,
+    lastAssistantReply = "",
+    router,
+    verifier,
+    timeoutMs = STANCE_CUE_VERIFY_TIMEOUT_MS,
+    promptsDir = PROMPTS_DIR,
+  } = params;
+
+  if (!isStanceCue(userMessage)) {
+    return false;
+  }
+
+  const trimmedPrev = lastAssistantReply.trim().slice(-500);
+  const runWithTimeout = async <T>(
+    taskFactory: () => Promise<T>,
+    fallback: T,
+  ): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const task = Promise.resolve().then(taskFactory);
+      const timeoutPromise = new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      });
+      return await Promise.race([task, timeoutPromise]);
+    } catch {
+      return fallback;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  if (verifier) {
+    return runWithTimeout(
+      () =>
+        verifier({
+          userMessage,
+          lastAssistantReply: trimmedPrev,
+        }),
+      true,
+    );
+  }
+
+  if (!router) {
+    return true;
+  }
+
+  return runWithTimeout(async () => {
+    const route = router.getRoute("endocrine");
+    const system = readPrompt("stance-cue-judge.md", promptsDir).text;
+    const promptBody = trimmedPrev
+      ? `我先对用户说：「${trimmedPrev}」\n用户接着对我说：「${userMessage}」\n（要判断的是用户接着说的这一条：用户是在针对『我』的看法/喜好发问或施压表态吗？若只是在转述或吐槽第三方，答 NO。只输出 YES 或 NO。）`
+      : `用户对我说：「${userMessage}」\n（用户是在针对『我』的看法/喜好发问或施压表态吗？若只是在转述或吐槽第三方，答 NO。只输出 YES 或 NO。）`;
+
+    const resp = await route.provider.generate({
+      model: route.model,
+      maxTokens: 16,
+      system,
+      messages: [{ role: "user", content: promptBody }],
+    });
+    const text = resp.text.trim();
+    if (/^(?:NO|否|不是的?|不对)(?:[\s\p{P}]|$)|\bNO\b/iu.test(text)) {
+      return false;
+    }
+    if (/^(?:YES|是的?|对)(?:[\s\p{P}]|$)|\bYES\b/iu.test(text)) {
+      return true;
+    }
+    return true;
+  }, true);
 }
 
 /**
@@ -496,6 +591,7 @@ export function recallMemories(params: {
   weights?: RecallWeights;
   recentSessionRecalledIds?: ReadonlySet<string>;
   excludeEventIds?: ReadonlySet<string>;
+  stanceCueOverride?: boolean;
 }): RecallResult {
   const {
     memoryDir,
@@ -508,12 +604,13 @@ export function recallMemories(params: {
     weights = DEFAULT_RECALL_WEIGHTS,
     recentSessionRecalledIds,
     excludeEventIds,
+    stanceCueOverride,
   } = params;
 
   const idle = isIdleQuery(query);
   const bypassedSessionDedup = isExplicitReaskQuery(query);
   const literalTriggered = hasLiteralRecallTrigger(query);
-  const stanceCueActive = !idle && isStanceCue(query);
+  const stanceCueActive = !idle && (stanceCueOverride ?? isStanceCue(query));
 
   const allFiles = loadStructuredMemoryFiles(memoryDir);
   // Stage 1: Active files (`有效` or `僵持待解`), excluding L0 INDEX, people symbol defs, and permanent rapport.md
@@ -554,25 +651,42 @@ export function recallMemories(params: {
   }
 
   const scoredMap = new Map<string, ScoredCandidate>();
+  const byIdToSymbol = new Map<string, string>();
   const idfMap = idle
     ? new Map<string, number>()
     : computeIdfKeywordScores(
         query,
-        candidateFiles.map((f) => ({ key: f.symbolKey, text: f.body })),
+        candidateFiles.map((f) => ({
+          key: f.symbolKey,
+          text: f.frontmatter.when_to_recall
+            ? `${f.frontmatter.when_to_recall}\n${f.body}`
+            : f.body,
+        })),
       );
 
   for (const file of candidateFiles) {
+    byIdToSymbol.set(file.frontmatter.id, file.symbolKey);
     const meta = db.getMemoryMeta(file.frontmatter.id);
     const strength = meta?.strength ?? 0.75;
 
     const ageHours = localCalendarDaysBetween(file.frontmatter.date, now) * 24;
     const timeScore = Math.pow(2, -ageHours / 72); // 72h half-life for recency feature
 
-    const sem = idle
-      ? 0
-      : queryEmbedding && meta?.embedding
-        ? cosineSimilarity(queryEmbedding, meta.embedding)
-        : computeLexicalSemanticSimilarity(query, file.body);
+    const cueText = file.frontmatter.when_to_recall?.trim();
+    let sem = 0;
+    if (!idle) {
+      if (queryEmbedding && meta?.embedding) {
+        sem = cosineSimilarity(queryEmbedding, meta.embedding);
+      } else {
+        const sBody = computeLexicalSemanticSimilarity(query, file.body);
+        if (cueText) {
+          const sCue = computeLexicalSemanticSimilarity(query, cueText);
+          sem = Math.min(1, Math.max(sBody, 0.85 * sCue + 0.15 * sBody));
+        } else {
+          sem = sBody;
+        }
+      }
+    }
 
     const kw = idle ? 0 : (idfMap.get(file.symbolKey) ?? 0);
 
@@ -720,6 +834,29 @@ export function recallMemories(params: {
           edge.targetSymbol,
           Math.max(graphScores.get(edge.targetSymbol) ?? 0, s),
         );
+      }
+
+      // Wave 5.2: 时序共现注意力转移边一跳联想（隐式共现补边；先过滤失效/已选中/低强度目标后再取前 3 条有效邻居）
+      const transitions = db.listTransitionsFrom(seed.file.frontmatter.id);
+      let acceptedTransitions = 0;
+      for (const tr of transitions) {
+        if (tr.weight < TRANSITION_RECALL_MIN_WEIGHT) break;
+        const targetSym = byIdToSymbol.get(tr.to_memory_id);
+        if (!targetSym || targetSym === seedKey || seedSymbols.has(targetSym)) {
+          continue;
+        }
+        const targetCand = scoredMap.get(targetSym);
+        if (!targetCand || targetCand.strength < HOP1_MIN_STRENGTH) continue;
+        const transScore =
+          targetCand.strength *
+          Math.min(1.0, tr.weight) *
+          TRANSITION_RECALL_COEFF;
+        graphScores.set(
+          targetSym,
+          Math.max(graphScores.get(targetSym) ?? 0, transScore),
+        );
+        acceptedTransitions += 1;
+        if (acceptedTransitions >= 3) break;
       }
 
       // Hop 1 Incoming edges: other active files referencing seed or sharing non-people entity
@@ -972,13 +1109,23 @@ export function recallMemories(params: {
       .map((file) => {
         const meta = db.getMemoryMeta(file.frontmatter.id);
         const strength = meta?.strength ?? 0.12;
-        const sem =
-          queryEmbedding && meta?.embedding
-            ? cosineSimilarity(queryEmbedding, meta.embedding)
-            : computeLexicalSemanticSimilarity(query, file.body);
-        const kw = computeKeywordScore(query, file.body);
+        const cueText = file.frontmatter.when_to_recall?.trim();
+        const searchText = cueText ? `${cueText}\n${file.body}` : file.body;
+        let sem: number;
+        if (queryEmbedding && meta?.embedding) {
+          sem = cosineSimilarity(queryEmbedding, meta.embedding);
+        } else {
+          const sBody = computeLexicalSemanticSimilarity(query, file.body);
+          if (cueText) {
+            const sCue = computeLexicalSemanticSimilarity(query, cueText);
+            sem = Math.min(1, Math.max(sBody, 0.85 * sCue + 0.15 * sBody));
+          } else {
+            sem = sBody;
+          }
+        }
+        const kw = computeKeywordScore(query, searchText);
         const hasSpecificTokenHit = queryCjkOrWords.some((t) =>
-          file.body.toLowerCase().includes(t),
+          searchText.toLowerCase().includes(t),
         );
         return { file, sem, kw, strength, hasSpecificTokenHit };
       })

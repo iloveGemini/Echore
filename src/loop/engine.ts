@@ -61,17 +61,24 @@ import {
 } from "../hippocampus/compiler.ts";
 import {
   type DecayArchiveReport,
+  type RecallBatchSnapshot,
   reconsolidateRecalledMemories,
+  recordMemoryTransitions,
   runDailyMemoryDecayAndArchive,
   syncMemoryMetaFromFiles,
+  syncSingleMemoryMetaFile,
 } from "../hippocampus/decay.ts";
 import {
   type LintReport,
   runMemoryLinter,
 } from "../hippocampus/linter.ts";
 import {
+  isIdleQuery,
+  isStanceCue,
   type RecallResult,
   recallMemories,
+  type StanceBinaryVerifier,
+  verifyStanceCueWithOrgan,
 } from "../hippocampus/recall.ts";
 import type { OrganModelRouter } from "../llm/router.ts";
 import type {
@@ -109,6 +116,9 @@ export interface EchoreEngineOptions {
   workerTools?: ZodTool[];
   /** 提示词目录，缺省仓库 prompts/（测试可换临时目录） */
   promptsDir?: string;
+  /** 可选注入立场锚二段复筛器（缺省按 endocrine 路由调用） */
+  stanceBinaryVerifier?: StanceBinaryVerifier;
+  stanceVerifyTimeoutMs?: number;
 }
 
 export interface ReactiveTurnOptions {
@@ -120,6 +130,28 @@ export interface ReactiveTurnOptions {
   userActiveLateNight?: boolean;
   /** 可选注入情绪官脉冲评估结果（或由 endocrine 路由模型自动评估） */
   pulseOverride?: Partial<PulseEvaluation>;
+  stanceBinaryVerifier?: StanceBinaryVerifier;
+  stanceVerifyTimeoutMs?: number;
+}
+
+export interface WhatIfProbeScenario {
+  userMessage?: string;
+  fastForwardMinutes?: number;
+  queryEmbedding?: number[];
+  stanceCueOverride?: boolean;
+}
+
+export interface WhatIfProbeResult {
+  probeNowIso: string;
+  hormoneState: HormoneState;
+  handover: SubconsciousHandover;
+  recalled?: RecallResult;
+}
+
+export interface RollbackSnapshotResult {
+  restored: boolean;
+  action: "deleted_creation" | "restored_content" | "not_found";
+  relPath?: string;
 }
 
 export interface ReactiveTurnOutput {
@@ -301,7 +333,10 @@ export class EchoreEngine {
   private readonly frontstageTools: ZodTool[];
   private readonly appendOnlyHistory: ChatMessage[] = [];
   private recentSessionRecalledIds: string[] = [];
+  private recentSubstantiveRecallBatches: RecallBatchSnapshot[] = [];
   private lastUserTurnAtMs: number | null = null;
+  private readonly stanceBinaryVerifier?: StanceBinaryVerifier;
+  private readonly stanceVerifyTimeoutMs?: number;
 
   constructor(options: EchoreEngineOptions) {
     this.clock = options.clock;
@@ -310,6 +345,8 @@ export class EchoreEngine {
     this.promptsDir = options.promptsDir ?? PROMPTS_DIR;
     this.profile = resolvePersonaProfile(options.persona);
     this.router = options.router;
+    this.stanceBinaryVerifier = options.stanceBinaryVerifier;
+    this.stanceVerifyTimeoutMs = options.stanceVerifyTimeoutMs;
 
     const silentWorkerTool = createSilentWorkerTool(
       this.router,
@@ -668,10 +705,30 @@ export class EchoreEngine {
       this.lastUserTurnAtMs !== null &&
       now.getTime() - this.lastUserTurnAtMs > 2 * 3600 * 1000
     ) {
-      // 超过 2 小时视为新一段会话，清空本会话已注入去重滑窗
+      // 超过 2 小时视为新一段会话，清空本会话已注入去重滑窗与共现转移滑窗
       this.recentSessionRecalledIds = [];
+      this.recentSubstantiveRecallBatches = [];
     }
     this.lastUserTurnAtMs = now.getTime();
+
+    let stanceCueOverride: boolean | undefined;
+    if (!isIdleQuery(userMessage) && isStanceCue(userMessage)) {
+      let lastAssistantReply = "";
+      for (let i = this.appendOnlyHistory.length - 1; i >= 0; i--) {
+        if (this.appendOnlyHistory[i]?.role === "assistant") {
+          lastAssistantReply = this.appendOnlyHistory[i]!.content;
+          break;
+        }
+      }
+      stanceCueOverride = await verifyStanceCueWithOrgan({
+        userMessage,
+        lastAssistantReply,
+        router: this.router,
+        verifier: options.stanceBinaryVerifier ?? this.stanceBinaryVerifier,
+        timeoutMs: options.stanceVerifyTimeoutMs ?? this.stanceVerifyTimeoutMs,
+        promptsDir: this.promptsDir,
+      });
+    }
 
     const recalled = recallMemories({
       memoryDir: this.memoryDir,
@@ -681,6 +738,7 @@ export class EchoreEngine {
       activeConcerns: activeConcernsBefore,
       recentSessionRecalledIds: new Set(this.recentSessionRecalledIds),
       excludeEventIds: new Set([userEvent.id]),
+      stanceCueOverride,
     });
 
     if (!recalled.isIdleQuery) {
@@ -694,6 +752,14 @@ export class EchoreEngine {
           this.recentSessionRecalledIds.slice(-15);
       }
     }
+
+    this.recentSubstantiveRecallBatches = recordMemoryTransitions({
+      db: this.db,
+      recalledItems: recalled.items,
+      isIdleQuery: recalled.isIdleQuery,
+      recentBatches: this.recentSubstantiveRecallBatches,
+      now,
+    });
 
     // Step 3: [情绪官] 推进实时激素衰减 + 出厂前四道调准 + 生成零数字交接单
     const steppedHormones = stepHormones({
@@ -1099,6 +1165,9 @@ export class EchoreEngine {
     const metaBackup = this.db.sqlite
       .query("SELECT * FROM memory_meta")
       .all() as Array<Record<string, unknown>>;
+    const snapshotsBackup = this.db.sqlite
+      .query("SELECT * FROM memory_snapshots")
+      .all() as Array<Record<string, unknown>>;
     try {
       const stepped = stepHormones({
         state: this.db.getHormoneState(),
@@ -1159,17 +1228,20 @@ export class EchoreEngine {
         todaysEvents,
         promptsDir: this.promptsDir,
       });
-      // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L7 终检 + git commit
+      // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L8 终检 + git commit
       const decayReport = runDailyMemoryDecayAndArchive({
         memoryDir: this.memoryDir,
         db: this.db,
         now,
         elapsedDays: options.elapsedDecayDays ?? 1,
+        sleepDate: dateStr,
       });
 
       if (decayReport.archivedIds.length > 0) {
         reconcileSynchronicLinksToInactiveFiles({
           memoryDir: this.memoryDir,
+          db: this.db,
+          sleepDate: dateStr,
         });
         syncMemoryMetaFromFiles({
           memoryDir: this.memoryDir,
@@ -1186,6 +1258,7 @@ export class EchoreEngine {
 
       if (!lintReport.passed) {
         const details = lintReport.issues
+          .filter((i) => i.severity === "error")
           .map((i) => `[${i.rule}] ${i.file}: ${i.message}`)
           .join("; ");
         throw new Error(
@@ -1197,6 +1270,7 @@ export class EchoreEngine {
           ? todaysEvents[todaysEvents.length - 1]!.id
           : null;
       this.db.advanceSleepCursor(this.clock.nowIso(), lastSettledEventId);
+      this.db.pruneOldMemorySnapshots(7);
 
       const gitCommitHash =
         options.autoGitCommit !== false
@@ -1277,8 +1351,8 @@ export class EchoreEngine {
         for (const m of metaBackup) {
           this.db.sqlite
             .query(
-              `INSERT INTO memory_meta (id, path, category, status, allow_forget, strength, access_count, last_accessed, embedding_json, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO memory_meta (id, path, category, status, allow_forget, strength, access_count, last_accessed, embedding_json, embedding_fingerprint, audit_fingerprint, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               m.id as string,
@@ -1290,12 +1364,130 @@ export class EchoreEngine {
               m.access_count as number,
               m.last_accessed as string,
               (m.embedding_json as string | null) ?? null,
+              (m.embedding_fingerprint as string | null) ?? null,
+              (m.audit_fingerprint as string | null) ?? null,
               m.updated_at as string,
+            );
+        }
+
+        this.db.sqlite.exec("DELETE FROM memory_snapshots;");
+        for (const s of snapshotsBackup) {
+          this.db.sqlite
+            .query(
+              `INSERT INTO memory_snapshots (id, sleep_date, memory_id, rel_path, original_content, is_creation, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              s.id as number,
+              s.sleep_date as string,
+              s.memory_id as string,
+              s.rel_path as string,
+              (s.original_content as string | null) ?? null,
+              s.is_creation as number,
+              s.created_at as string,
             );
         }
       });
       rollbackTx();
       throw err;
     }
+  }
+
+  /**
+   * Wave 7.1 SQLite `SAVEPOINT` 零副作用同步假设推演探针：
+   * - 硬契约 1：SAVEPOINT 内全程纯同步零 `await`（任何 embedding 必须先于调用前计算传入），事件循环绝不让出；
+   * - 硬契约 2：禁调生成式 LLM、禁含“立刻入睡”编译场景、禁触碰磁盘 `.md` 文件；
+   * - 硬契约 3：只读传入 `new Set(this.recentSessionRecalledIds)`，绝不修改引擎内存态。
+   */
+  probeWhatIf(scenario: WhatIfProbeScenario = {}): WhatIfProbeResult {
+    const savepointName = "echore_what_if_probe";
+    this.db.sqlite.exec(`SAVEPOINT ${savepointName};`);
+    try {
+      const offsetMs = (scenario.fastForwardMinutes ?? 0) * 60_000;
+      const probeNow = new Date(this.clock.now().getTime() + offsetMs);
+      const activeConcerns = this.db.listActiveConcerns();
+      const steppedHormones = stepHormones({
+        state: this.db.getHormoneState(),
+        profile: this.profile,
+        now: probeNow,
+        activeConcerns,
+      });
+      this.db.saveHormoneState(steppedHormones);
+
+      const handover = buildSubconsciousHandover({
+        hormoneState: steppedHormones,
+        profile: this.profile,
+        activeConcerns,
+        db: this.db,
+        now: probeNow,
+      });
+
+      const recalled =
+        scenario.userMessage !== undefined
+          ? recallMemories({
+              memoryDir: this.memoryDir,
+              db: this.db,
+              query: scenario.userMessage,
+              now: probeNow,
+              activeConcerns,
+              queryEmbedding: scenario.queryEmbedding,
+              stanceCueOverride: scenario.stanceCueOverride,
+              recentSessionRecalledIds: new Set(this.recentSessionRecalledIds),
+            })
+          : undefined;
+
+      return {
+        probeNowIso: probeNow.toISOString(),
+        hormoneState: steppedHormones,
+        handover,
+        ...(recalled ? { recalled } : {}),
+      };
+    } finally {
+      this.db.sqlite.exec(`ROLLBACK TO ${savepointName};`);
+      this.db.sqlite.exec(`RELEASE ${savepointName};`);
+    }
+  }
+
+  /**
+   * Wave 7.2 观测台单文件快照一键回滚：
+   * 按 `(sleepDate, memoryId)` 读取 Copy-on-Write 最早基线，仅还原目标记忆文件与元数据，不波及同夜其他编译产物。
+   */
+  rollbackMemorySnapshot(
+    sleepDate: string,
+    memoryId: string,
+  ): RollbackSnapshotResult {
+    const snap = this.db.getMemorySnapshot(sleepDate, memoryId);
+    if (!snap) {
+      return { restored: false, action: "not_found" };
+    }
+
+    const absPath = path.join(this.memoryDir, snap.rel_path);
+    if (snap.is_creation) {
+      fs.rmSync(absPath, { force: true });
+      this.db.deleteMemoryMeta(memoryId);
+      this.db.deleteMemorySnapshot(sleepDate, memoryId);
+      return {
+        restored: true,
+        action: "deleted_creation",
+        relPath: snap.rel_path,
+      };
+    }
+
+    if (snap.original_content !== null) {
+      fs.mkdirSync(path.dirname(absPath), { recursive: true });
+      fs.writeFileSync(absPath, snap.original_content, "utf8");
+      syncSingleMemoryMetaFile({
+        memoryDir: this.memoryDir,
+        relPath: snap.rel_path,
+        db: this.db,
+        now: this.clock.now(),
+      });
+    }
+    this.db.deleteMemorySnapshot(sleepDate, memoryId);
+    return {
+      restored: true,
+      action: "restored_content",
+      relPath: snap.rel_path,
+    };
   }
 }

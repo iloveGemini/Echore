@@ -17,4 +17,5 @@
 | [`bedtime-reflection.md`](bedtime-reflection.md) | `frontstage` | 环 3 昼夜睡眠（Step 1）· [`src/frontstage/journal.ts`](../src/frontstage/journal.ts) | 汇总白天热记事与 30min 双向原话反馈链，写睡前第一人称自省冷叙事 |
 | [`silent-worker.md`](silent-worker.md) | `worker` | 环 1 重活委托 · [`src/frontstage/silent-worker.ts`](../src/frontstage/silent-worker.ts) | 后台无声替身 Subagent 搜集比对资料，强制归位第一人称随手笔记 |
 | [`endocrine-pulse.md`](endocrine-pulse.md) | `endocrine` | 环 1 / MCP `digestTurn` · [`src/loop/engine.ts`](../src/loop/engine.ts) | 结合 `rapport.md` 默契滤网与活跃牵挂注，输出结构化 `PulseEvaluation` JSON |
+| [`stance-cue-judge.md`](stance-cue-judge.md) | `endocrine` | 环 1 立场锚二段复筛 · [`src/hippocampus/recall.ts`](../src/hippocampus/recall.ts) | 正则初筛命中后，结合上一轮语境二元判定是否针对「我」施压表态 |
 | [`memory-compiler.md`](memory-compiler.md) | `compiler` | 环 3 昼夜睡眠（Step 3）· [`src/hippocampus/compiler.ts`](../src/hippocampus/compiler.ts) | 夜间唯一 Markdown 编译器，输出结构化 `CompilationPlan` JSON（含 Z 式防误取代与默契收窄规则） |

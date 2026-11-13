@@ -1,35 +1,20 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-12（完成记忆系统进化 **Wave 1–4 全部落地**、**跨午夜作息睡眠游标与日记封底修复**，以及**全系统 9 路 LLM 提示词解耦收敛至 `prompts/*.md`**，验证 48/48 测试全绿）。
+> 最后更新：2026-11-13（完成 **Horon 记忆吸收二期 Wave 5–7 全部落地**及工作区 review 缺陷修复与 `evals/` 人工考卷补齐；验证 60/60 测试全绿）。
 
-## 1. 当前阶段与核心决议（2026-11-12）
+## 1. 当前阶段与核心决议（2026-11-13）
 
-- **当前阶段**：**M1、M2、M3 与记忆进化 Wave 1–4 全部完成**；下一步进入 **F1 正式前端定稿与后端联调**。
-- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.4）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)（v2 已完成）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
+- **当前阶段**：**M1–M3、记忆进化 Wave 1–4 与 Horon 吸收 Wave 5–7 全部完成**；下一步进入 **F1 正式前端定稿与后端联调**。
+- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.4）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md)（Wave 1–4 已完成）· [`notes/plan/horon-memory-absorption-plan.md`](notes/plan/horon-memory-absorption-plan.md)（v2.1 · Wave 5–7 已完成）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
 - **M1 / M2 / Wave 1–4 已落地交付项（摘要）**：
   - `src/core/`（含 `prompts.ts` 与 `prompts/*.md` 读时热加载）、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal,solitary}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 2 自主心跳环 + 环 3 昼夜睡眠新陈代谢环）。
-  - **LLM 提示词外置化 (`prompts/*.md` & `src/core/prompts.ts`，2026-11-12，借鉴自 Psyche)**：将全系统 4 器官 9 个 LLM 调用点的系统提示词（`frontstage-system.md`、`proactive-wake.md`、`solitary-roaming.md`、`solitary-project.md`、`solitary-prep.md`、`bedtime-reflection.md`、`silent-worker.md`、`endocrine-pulse.md`、`memory-compiler.md`）统一收敛至顶层 [`prompts/`](prompts/README.md)，带 `version` 与 `organ` frontmatter，读时现读不缓存、支持 `promptsDir` 沙箱覆写。
-  - **Wave 1 夜间编译止血与原子回滚护栏（2026-11-12）**：
-    1. **Z 式冲突待复核门 (`src/hippocampus/compiler.ts`)**：保护 `allow_forget: false` 钉子记忆与 `people/*` 定义档；对未显式声明 `supersedes` 的 `preference / life_event / chat` 槽位碰撞，保留旧文件为 `有效`，将新断言降级为 `情境表态(...)` 并记入 `pendingConflicts`。
-    2. **L7 记忆颗粒度机检 (`src/hippocampus/linter.ts`)**：拦截单文件断言过载（`> 6` 条，`too_coarse`）、正文超长（`> 600` 字符，`too_coarse`）与空洞/未格式化断言（`needs_rewrite`）。
-    3. **睡眠环原子回滚 (`src/loop/engine.ts` · `runSleepCycle()`)**：写操作前记录 `memoryDir` 文件快照与 SQLite 备份；若 L1–L7 机检未通过或抛错，100% 还原磁盘 `.md` 文件与 SQLite 状态表。
-  - **Wave 2 召回卫生、三层级联冷仓唤醒与时间体感（2026-11-12）**：
-    1. **空档输入短路与防刷分 (`recall.ts` · `decay.ts`)**：`isIdleQuery` 识别纯语气/应答词（“嗯/好的/哈哈哈可以的”），短路跳过桶 B/C 与 `reconsolidateRecalledMemories` 加分。
-    2. **会话去重与点名重提豁免 (`recall.ts` · `engine.ts`)**：维护本会话 2h 内已注入记忆滑窗施加 `0.40x` 降权，命中 `isExplicitReaskQuery` 自动豁免。
-    3. **三层级联兜底与冷仓唤醒闭环 (`recall.ts` · `decay.ts`)**：Stage 1 活跃 MD → Stage 2 `event_log_fts` + 当日 `journal` 热记事（`[当时原话线索]`）→ Stage 3 显式追问旧茬时唤醒 `status: 已沉底` 冷归档并在再巩固时恢复为 `有效`、强度回血至 `0.435`。
-    4. **模糊时间感与停顿体感 (`clock.ts` · `pre-hydrator.ts`)**：落地 `formatVagueWhen` 与 `formatGapHint`。
-  - **Wave 3 召回回放评测集、IDF 实词打分、三通道 RRF 融合与二跳图谱（2026-11-12）**：
-    1. **召回回放黄金评测集 (`tests/recall-replay.test.ts`)**：覆盖长句罕见专名、低分准确命中 vs 高分一跳邻居、二跳桥接与度数 $\ge 5$ Hub 抑制、空档卫生等场景。
-    2. **IDF 实词字面打分 + 三检索通道 RRF 融合 (`recall.ts`)**：`computeIdfKeywordScores` 消除长句日常词对专名的稀释；`computeThreeChannelRrfScores` 仅对 `sem / kw / graph` 三检索通道排加权 RRF（$k=60$），再叠加 `0.10*time + 0.10*strength` 标量先验。
-    3. **桶 C 二跳图扩散与 Hub 抑制 (`recall.ts`)**：支持 `Hop 1 >= 0.30`、`Hop 2 >= 0.50` 递进扩散，历时边施加 `0.40x` 阻尼，并对总度数 $\ge 5$ 的 Hub 节点拦截二跳中继。
-  - **Wave 4 睡前双向原话反馈链、默契条件收窄与双门控立场锚（2026-11-12）**：
-    1. **30min 时间窗双向原话反馈链 (`journal.ts` · `compiler.ts`)**：`extractFeedbackTriplets` 按相邻消息 $\le 30\text{min}$ 切分连续对话段，机械配对 `prev -> acts -> next` 原话三联包递给睡前自省与夜间编译器，防自我美化。
-    2. **默契反例条件收窄 (`compiler.ts` · `schemas.ts`)**：`RapportRuleSpecSchema` 支持 `revises_rule_prefix`，就地收窄既有 `rapport.md` 默契条目并更新 `[src: log-xxx]`。
-    3. **双门控 B 立场锚 (`recall.ts`)**：同时满足门控 1（评价词 + 征询/反问词 `isStanceCue`）与门控 2（住户历史表态 `hasMemoryStance` + 实质话题重叠 `sem > 0.30 || kw > 0.25`）时，穿透会话去重并赋予 `+0.22` 立场锚加成（`[我之前的立场]`），根治闲聊顺从改口。
-- **跨午夜日记封底与单调睡眠游标修复（2026-11-12，吸收自 Psyche `coldCursor`）**：
-  1. **单调睡眠游标 (`src/core/db.ts` · `getUnsettledEventLogs` & `advanceSleepCursor`)**：`reflex_state` 记录 `last_sleep_settled_at` 与 `last_sleep_event_id`，睡前自省与记忆编译按 `rowid > cursor_rowid` 增量捞取未结转事件并配合 `idx_event_log_timestamp` 索引范围查询，彻底根除跨零点漏编、07:00 晨起“记忆孤儿”与全表扫描隐患（含睡眠环异常时游标原子回滚）。
-  2. **日记封底切分 (`src/reflex/guard.ts` · `getCircadianDateStr` & `src/loop/engine.ts`)**：跨午夜就寝前若昨日日记未写 `## 睡前自省`，熬夜互动归入昨日日记；一旦昨日日记已完成 `## 睡前自省` 封底（或早鸟作息 23:30 已入睡），此后凌晨夜醒或清晨 07:00 早起互动一律开启今日新日记 `journal/今日.md`，且清晨心跳不再误触发二次睡眠环。
+  - **LLM 提示词外置化 (`prompts/*.md` & `src/core/prompts.ts`)**：将全系统 4 器官 10 个提示词（含 `stance-cue-judge.md`）统一收敛至顶层 [`prompts/`](prompts/README.md)，带 `version` 与 `organ` frontmatter，读时现读不缓存、支持 `promptsDir` 沙箱覆写。
+  - **记忆进化 Wave 1–4（2026-11-12，摘要）**：Z 式冲突待复核门、L7 颗粒度机检与睡眠环原子回滚；空档短路、会话去重与三层级联冷仓唤醒；IDF 实词打分、三通道 RRF 融合、二跳 Hub 抑制图扩散与 `recall-replay` 基准；30min 双向原话反馈链、`rapport.md` 条件收窄与双门控立场锚；跨午夜单调睡眠游标（`getUnsettledEventLogs`）与日记封底切分（`getCircadianDateStr`）。
+  - **Horon 吸收二期 Wave 5–7（2026-11-13，摘要）**：
+    1. **Wave 5.1–5.2 书腰索引与共现转移边 (`schemas.ts` · `compiler.ts` · `recall.ts` · `decay.ts` · `db.ts`)**：支持 `when_to_recall` + 反泛化门 `sanitizeWhenToRecall`、词法/IDF 融合与 `embedding_fingerprint` 变更清空陈旧 `embedding_json`；`memory_transitions` 事务化记录 30min 滑窗内跨轮实质召回批次共现（`step=0.35`, `γ=0.95`, `<0.05` 剪枝，无 `1.0` 封顶）并入桶 C 一跳联想。
+    2. **Wave 6.1–6.3 门控精度与文本补丁 (`recall.ts` · `linter.ts` · `text-patch.ts` · `compiler.ts` · `evals/`)**：`isStanceCue` 非空档命中走 `endocrine` 路由二元复筛（`1200ms` 超时降级）；`memory_meta.audit_fingerprint` 仅在通过 L7 后落盘供增量跳过，L8 主题混装 `Warning`（全断言带锚 + `>=300B` + `>=3` 断言，绝不阻断睡眠环）；独立实现 `replaceUniqueNormalizedFragment`（不改全文 NFC）加固 `rapport.md` 条件收窄；补齐 `evals/{stance-cue-judge,memory-compiler}` 人工考卷。
+    3. **Wave 7.1–7.2 推演探针与 CoW 快照 (`engine.ts` · `db.ts` · `http-server.ts`)**：`probeWhatIf()` 在 SQLite `SAVEPOINT` 内纯同步零副作用推演并暴露 `POST /api/observatory/what-if`；`memory_snapshots` 按需 Copy-on-Write 捕获当夜最早基线、自动清理 7 个睡眠日前快照并支持局部同步 `rollbackMemorySnapshot()` / `POST /api/observatory/rollback-snapshot`。
 - **M3.1 已落地交付项（五官感知层 + 独居生活引擎）**：
   1. **四通道边际感知层 (`src/perception/`)**：`chrono-ambient.ts`（天气剧变/断联/特殊时间窗边际触发）、`desktop-probe.ts`（状态段去噪聚合 + 隐私黑名单 + 禁报进程名）、`world-feed.ts`（RSS/Atom 与 HTML 正文提取）。
   2. **独居生活引擎 (`src/frontstage/solitary.ts`)**：`runSolitaryTick` 实现 S1 `feed_roaming`、S2 `hobby_project`（`projects.yaml` 跨天目标进度树）、S3 `secret_prep`（`prep_for_user.md` + 置 `has_prep: true`），落盘 `event_log` 与 `journal/` 并将多巴胺回血至 $B_{\text{da}} + 0.12$。
@@ -58,12 +43,13 @@
 9. **记忆进化 Wave 2：空档短路 + 会话去重 + 三层级联冷仓唤醒 + 时间体感（✅ 已完成，2026-11-12）**
 10. **记忆进化 Wave 3：召回回放黄金评测集 + IDF 实词打分 + 三通道 RRF 融合 + 二跳度数抑制图扩散（✅ 已完成，2026-11-12）**
 11. **记忆进化 Wave 4：睡前 30min 双向原话反馈链 + `rapport.md` 反例条件收窄 + 双门控 B 立场锚（✅ 已完成，2026-11-12）**
+12. **Horon 吸收 Wave 5–7：书腰触发索引 + 共现转移边 + 两段式立场锚 + 指纹/L8 Warning + 归一化补丁 + `SAVEPOINT` 探针 + CoW 快照（✅ 已完成，2026-11-13）**
 
 ---
 
-## 3. 验证结果与运行备忘（2026-11-12）
+## 3. 验证结果与运行备忘（2026-11-13）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **10 个测试文件、48/48 项测试（486 个断言）全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **11 个测试文件、60/60 项测试（598 个断言）全绿通过**（`tests/horon-waves-5-7.test.ts` 12/12 在 `UTC` / `Asia/Shanghai` / `America/New_York` 三时区全绿）
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
-- **已知问题**：无阻塞问题；跨午夜起居日闭环已打通，后端三环引擎与 HTTP/SSE 服务层就绪，可进入前端设计。
+- **已知问题**：`bun run test:tz` 下既有 `tests/llm-and-loop.test.ts:399` 在 `TZ=Asia/Shanghai` 会因固定 UTC 测试夹具时间戳落入 `night_owl` 跨午夜起居日而失败（与本次改动无关）；真实 embedding provider 尚未接入，Wave 5.1 向量路径端到端联调待接入后补测。

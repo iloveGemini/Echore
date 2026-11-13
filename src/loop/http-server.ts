@@ -255,6 +255,7 @@ export function createEchoreHttpApp(options: {
       db: engine.db,
       now,
     });
+    const memorySnapshots = engine.db.listMemorySnapshots();
 
     return {
       clock: {
@@ -273,6 +274,7 @@ export function createEchoreHttpApp(options: {
       todayHotEntries,
       todayColdReflection,
       lintReport,
+      memorySnapshots,
     };
   };
 
@@ -507,6 +509,48 @@ export function createEchoreHttpApp(options: {
           success: true,
           profile: newProfile,
         });
+      }
+
+      // 9.5 观测台：SAVEPOINT 零副作用假设推演 (Wave 7.1): POST /api/observatory/what-if
+      if (req.method === "POST" && pathname === "/api/observatory/what-if") {
+        const rawBody = await req.json();
+        const WhatIfBodySchema = z.object({
+          userMessage: z.string().optional(),
+          fastForwardMinutes: z.number().min(-1440).max(10080).optional(),
+        });
+        const parsed = WhatIfBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid what-if body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const probeResult = engine.probeWhatIf(parsed.data);
+        return jsonResponse(probeResult);
+      }
+
+      // 9.6 观测台：单文件夜间快照回滚 (Wave 7.2): POST /api/observatory/rollback-snapshot
+      if (
+        req.method === "POST" &&
+        pathname === "/api/observatory/rollback-snapshot"
+      ) {
+        const rawBody = await req.json();
+        const RollbackBodySchema = z.object({
+          sleepDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+          memoryId: z.string().min(1),
+        });
+        const parsed = RollbackBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid rollback body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const result = engine.rollbackMemorySnapshot(
+          parsed.data.sleepDate,
+          parsed.data.memoryId,
+        );
+        return jsonResponse(result);
       }
 
       // 10. 极轻静态文件托管（开发者联调与性格测试台）
