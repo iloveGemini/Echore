@@ -24,12 +24,24 @@ export interface FeedbackTriplet {
  * - 相邻消息时间差 > 30min 视为不同对话段，绝不跨断档强行配对；
  * - 在同一连续对话段内，机械配对「用户前一句 prev → 住户连续回复 acts → 用户紧接着的真实反应 next」。
  */
+function isGenuineUserEvent(e: EventLogRecord): boolean {
+  if (e.status && e.status !== "active") return false;
+  if (e.producer) return e.producer === "user";
+  return e.role === "user";
+}
+
+function isGenuineResidentEvent(e: EventLogRecord): boolean {
+  if (e.status && e.status !== "active") return false;
+  if (e.producer) return e.producer === "resident";
+  return e.role === "assistant";
+}
+
 export function extractFeedbackTriplets(
   events: readonly EventLogRecord[],
   maxGapMs = DEFAULT_FEEDBACK_SEGMENT_GAP_MS,
 ): FeedbackTriplet[] {
   const dialogEvents = events.filter(
-    (e) => e.role === "user" || e.role === "assistant",
+    (e) => isGenuineUserEvent(e) || isGenuineResidentEvent(e),
   );
   if (dialogEvents.length === 0) return [];
 
@@ -67,18 +79,18 @@ export function extractFeedbackTriplets(
     let lastUserEv: EventLogRecord | null = null;
     while (i < seg.length) {
       const ev = seg[i]!;
-      if (ev.role === "user") {
+      if (isGenuineUserEvent(ev)) {
         lastUserEv = ev;
         i += 1;
         continue;
       }
       const acts: EventLogRecord[] = [];
-      while (i < seg.length && seg[i]!.role === "assistant") {
+      while (i < seg.length && isGenuineResidentEvent(seg[i]!)) {
         acts.push(seg[i]!);
         i += 1;
       }
       const nextUserEv =
-        i < seg.length && seg[i]!.role === "user" ? seg[i]! : null;
+        i < seg.length && isGenuineUserEvent(seg[i]!) ? seg[i]! : null;
       triplets.push({
         prev: lastUserEv,
         acts,
@@ -163,6 +175,116 @@ export function appendHotJournalEntry(input: HotJournalEntryInput): string {
 
   fs.appendFileSync(filePath, `${header}${entryLine}`, "utf8");
   return entryLine.trim();
+}
+
+/**
+ * 当发生删除、Reroll 或版本切换时，按当前 `status = 'active'` 的当日事件流同步重整 `journal/YYYY-MM-DD.md` 中的 `交互` 热记事行，
+ * 保留 `独居` 与 `睡前自省` 原文，确保被丢弃的 Reroll 候选或已删消息绝不残留在热记事里进入夜间编译。
+ */
+export function syncInteractiveHotJournalForDate(params: {
+  memoryDir: string;
+  dateStr: string;
+  activeDateEvents: readonly EventLogRecord[];
+}): void {
+  const { memoryDir, dateStr, activeDateEvents } = params;
+  const filePath = path.join(memoryDir, "journal", `${dateStr}.md`);
+  if (!fs.existsSync(filePath)) return;
+
+  const raw = fs.readFileSync(filePath, "utf8");
+  const lines = raw.split(/\r?\n/);
+  const nonInteractiveLines = lines.filter(
+    (l) => !/^-\s*\[[^\]]+·\s*交互\]/.test(l.trim()),
+  );
+
+  const interactiveLines: string[] = [];
+  const activeOnly = activeDateEvents.filter(
+    (e) => (e.status ?? "active") === "active",
+  );
+
+  let i = 0;
+  while (i < activeOnly.length) {
+    const ev = activeOnly[i]!;
+    const producer =
+      ev.producer ??
+      (ev.role === "user"
+        ? "user"
+        : ev.role === "assistant"
+          ? "resident"
+          : ev.role);
+
+    if (
+      producer === "resident" &&
+      (ev.source === "heartbeat" || ev.metadata?.proactive === true)
+    ) {
+      const timeStr = formatLocalTimeHm(new Date(ev.timestamp));
+      const clean = ev.content
+        .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const line = `- [${timeStr} · 交互] 我主动找他说：“${clean.slice(0, 60)}”`;
+      assertNoInternalLeaks(line, "syncInteractiveHotJournalForDate");
+      interactiveLines.push(line);
+      i += 1;
+      continue;
+    }
+
+    if (producer === "user") {
+      const nextEv = activeOnly[i + 1];
+      const nextProducer =
+        nextEv?.producer ??
+        (nextEv?.role === "assistant" ? "resident" : nextEv?.role);
+      if (
+        nextEv &&
+        (nextProducer === "resident" || nextProducer === "external")
+      ) {
+        const timeStr = formatLocalTimeHm(new Date(nextEv.timestamp));
+        const cleanUser = ev.content
+          .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const cleanReply = nextEv.content
+          .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const prefix =
+          nextEv.source === "mcp_digest"
+            ? `刚才在外面和他就“${cleanUser.slice(0, 30)}”聊了一轮，我回他：“${cleanReply.slice(0, 60)}”`
+            : `今天和他就“${cleanUser.slice(0, 30)}”聊了几句，我回他：“${cleanReply.slice(0, 60)}”`;
+        const line = `- [${timeStr} · 交互] ${prefix}`;
+        assertNoInternalLeaks(line, "syncInteractiveHotJournalForDate");
+        interactiveLines.push(line);
+        i += 2;
+        continue;
+      }
+    }
+
+    i += 1;
+  }
+
+  // Insert interactiveLines before `## 睡前自省` if present, otherwise at the end
+  const reflectionHeaderIdx = nonInteractiveLines.findIndex((l) =>
+    l.trim().startsWith("## 睡前自省"),
+  );
+  let rebuilt: string[];
+  if (reflectionHeaderIdx !== -1) {
+    rebuilt = [
+      ...nonInteractiveLines.slice(0, reflectionHeaderIdx),
+      ...interactiveLines,
+      ...nonInteractiveLines.slice(reflectionHeaderIdx),
+    ];
+  } else {
+    const trimmedTail = [...nonInteractiveLines];
+    while (
+      trimmedTail.length > 0 &&
+      trimmedTail[trimmedTail.length - 1]!.trim() === ""
+    ) {
+      trimmedTail.pop();
+    }
+    rebuilt = [...trimmedTail, ...interactiveLines, ""];
+  }
+
+  const nextContent = `${rebuilt.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+  fs.writeFileSync(filePath, nextContent, "utf8");
 }
 
 export function readJournalContent(

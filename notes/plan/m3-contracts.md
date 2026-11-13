@@ -222,3 +222,40 @@
   - `chat_turn`：实时对话完成（仅含零泄露陪伴摘要）；
   - `proactive_message`：环 2 分支 A 主动破冰消息（强制过 `assertNoInternalLeaks`，供聊天主窗口直接渲染住户主动发来的气泡）；
   - `heartbeat` / `fast_forward` / `sleep_cycle` / `persona_updated`：通知观测台刷新内部状态、人设原型与时间轴。
+
+---
+
+## 5. 系统账本 (`system_log` + `system_materials`)、`event_log` v2 与双保险备份契约（2026-11-13）
+
+> 详细设计见 [`notes/background/SYSTEM-LOG-DESIGN-20261113.md`](../background/SYSTEM-LOG-DESIGN-20261113.md)（v0.3）。
+
+### 5.1 `system_log` 与 `system_materials`（Append-Only 账本）
+
+1. **表结构与触发器**：
+   - `system_log (id TEXT PK, at INTEGER, recorded INTEGER, actor TEXT, kind TEXT, artifact TEXT, old_hash TEXT NULL, new_hash TEXT NULL, reason TEXT, link TEXT NULL)`，挂载 `BEFORE UPDATE` 与 `BEFORE DELETE` `RAISE(ABORT)` 触发器；
+   - `system_materials (hash TEXT PK, content TEXT, created_at TEXT)`，以 SHA-256（UTF-8 原文字节）内容寻址去重存储提示词版本与《变更自述》全文。
+2. **事件类型 (`kind`)**：
+   - `prompt_changed` | `model_changed` | `config_changed` | `spine_changed` | `import` | `migration` | `sleep_rollback` | `snapshot_rollback` | `message_deleted` | `message_edited` | `backup_completed` | `deploy`。
+3. **配置纪元 (`config_epoch`)**：
+   - 任何行为条件变更（`prompt_changed` / `model_changed` / `config_changed` / `deploy`）使 `config_epoch` 自增；每次 `appendEventLog` 自动将当前 `config_epoch` 注入 `metadata_json`。
+4. **红线隔离**：
+   - 前台无任何写 `system_log` 入口；住户侧只读摘要通过 `formatSystemLogForResident()` 转为零数字、无内部标识符的自然语言说明，并强制通过 `assertNoInternalLeaks`。
+
+### 5.2 `event_log` Schema v2、四类消息操作与多媒体附件
+
+1. **新增列与枚举**：
+   - `group_id TEXT NOT NULL`（跨 reroll 版本稳定 ID，默认 `= id`）、`version INTEGER NOT NULL DEFAULT 1`、`status TEXT NOT NULL DEFAULT 'active'`（`'active' | 'candidate'`）；
+   - `producer TEXT NOT NULL`：`'user' | 'resident' | 'peer' | 'system' | 'solitary' | 'external'`；
+   - `source TEXT NOT NULL`：`'chat' | 'group' | 'mcp_digest' | 'import' | 'heartbeat' | 'solitary' | 'system'`。
+2. **四类消息操作（`EchoreEngine` & HTTP API）**：
+   - `deleteMessagesFrom(eventId, options?)`（`POST /api/chat/delete`）：按 `rowid >= target` 删除 `event_log` 与 FTS，截断内存历史；若跨过 `last_sleep_event_id` 则回退游标；未过夜消息同步清理当日 `journal/YYYY-MM-DD.md` 对应交互热记事与新增 `concerns`；已过夜消息记 `message_deleted`，且 Linter L5 将落入删除区间的缺失 `source_event_id` 降级为 `warning (orphaned_by_deletion)`；
+   - `rerollLastAssistantReply(options?)` & `switchMessageVersion(groupId, version)`（`POST /api/chat/reroll`、`POST /api/chat/version`）：同 `group_id` 内当前选中版本恒为 `status = 'active'`，其余为 `'candidate'`，同步更新 FTS、内存历史与当日热记事尾行；下一条新消息或入睡前物理清除 `'candidate'`；
+   - `editLastUserMessage(eventId, newContent)`（`POST /api/chat/edit`）：仅允许修改最近一条尚无回复的用户消息，记 `message_edited`（不存旧文）；
+   - `event_attachments` 表与 SHA-256 引用计数管理：仅当同一 `hash` 引用计数归零时才物理删除磁盘附件文件。
+
+### 5.3 凌晨 04:30 + 启动补备双保险整库备份
+
+- `runSystemBackup(options)`：通过 `VACUUM INTO` 导出一致性 `echore.sqlite` 快照并同步打包 `memoryDir` 与 `media/` 至 `<dataDir>/backups/YYYY-MM-DD/`，写 `backup_completed` 入 `system_log`；
+- **定时触发**：环 2 心跳在每日 `04:30`（`04:00–05:00` 睡后窗口，三类作息均已入睡并完成夜间编译后）自动触发当日备份（同日单次）；
+- **启动预检补备**：服务启动（`ensureStartupBackup()`）若发现上次备份缺失或距今 `>= 20h` 且有新事件，立即先执行一次 `startup_catchup` 备份再对外提供服务。
+

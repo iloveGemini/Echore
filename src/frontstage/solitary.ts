@@ -448,6 +448,8 @@ export async function runSolitaryTick(
     role: "solitary",
     speaker: profile.name,
     content: firstPersonNote,
+    producer: "solitary",
+    source: "solitary",
     metadata: {
       action_kind: actionKind,
       artifact_path: artifactRelPath,

@@ -23,7 +23,10 @@ import {
   loadStructuredMemoryFiles,
   type ParsedMemoryFile,
 } from "./linter.ts";
-import { preHydrateQuotes } from "./pre-hydrator.ts";
+import {
+  formatEventSpeakerForRecall,
+  preHydrateQuotes,
+} from "./pre-hydrator.ts";
 
 export type RecallBucket = "bucket_a_mainline" | "bucket_b_topic" | "bucket_c_graph";
 
@@ -1313,13 +1316,14 @@ export function recallMemories(params: {
       .slice(0, 2);
 
     for (const ev of ftsHits) {
+      const speaker = formatEventSpeakerForRecall(ev, "past");
+      if (!speaker) continue;
       const clean = ev.content
         .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 120);
       const timeLabel = formatVagueWhen(ev.timestamp, now);
-      const speaker = ev.role === "user" ? "他说" : "我当时说";
       rawEventSnippets.push(
         `- [当时原话线索 · ${timeLabel}] ${speaker}：“${clean}”`,
       );

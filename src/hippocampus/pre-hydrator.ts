@@ -5,6 +5,41 @@ import {
   type EventLogRecord,
 } from "../core/schemas.ts";
 
+export function formatEventSpeakerForRecall(
+  record: EventLogRecord,
+  variant: "past" | "flow" = "past",
+): string | null {
+  const producer =
+    record.producer ??
+    (record.role === "user"
+      ? "user"
+      : record.role === "assistant"
+        ? "resident"
+        : record.role === "solitary"
+          ? "solitary"
+          : "system");
+
+  if (producer === "system") {
+    return null;
+  }
+
+  const importPrefix = record.source === "import" ? "（搬家前）" : "";
+  switch (producer) {
+    case "user":
+      return `${importPrefix}他说`;
+    case "resident":
+      return `${importPrefix}${variant === "past" ? "我当时说" : "我说"}`;
+    case "peer":
+      return `${importPrefix}${record.speaker || "同伴"}${variant === "past" ? "当时说" : "说"}`;
+    case "external":
+      return `${importPrefix}（外部对话记录）`;
+    case "solitary":
+      return `${importPrefix}${variant === "past" ? "当时记录" : "独居记事"}`;
+    default:
+      return null;
+  }
+}
+
 /**
  * §4.1 预水合器（Pre-Hydrator）
  * 根据 source_event_id 从 SQLite Event Log 提取当时 1~2 句原始对话引文，
@@ -22,19 +57,16 @@ export function preHydrateQuotes(
     const id = rawId.trim();
     if (!id || result.has(id)) continue;
 
-    const record = db.getEventLogById(id);
+    const record = db.getEventLogById(id, { activeOnly: true });
     if (!record) continue;
+
+    const speakerLabel = formatEventSpeakerForRecall(record, "past");
+    if (!speakerLabel) continue;
 
     // 回想只给大概：有 now 就只给模糊时间，不并列精确日期（与 recall.ts 的渲染规则一致）
     const timePrefix = now
       ? formatVagueWhen(record.timestamp, now)
       : record.timestamp.slice(0, 10);
-    const speakerLabel =
-      record.role === "user"
-        ? "他说"
-        : record.role === "assistant"
-          ? "我当时说"
-          : "当时记录";
 
     // Sanitize any accidental log-* string inside content just in case
     const cleanContent = record.content
@@ -63,6 +95,10 @@ export function formatEventFlowWithGapHints(
   let prevMs: number | null = null;
 
   for (const rec of records) {
+    if (rec.status && rec.status !== "active") continue;
+    const speakerLabel = formatEventSpeakerForRecall(rec, "flow");
+    if (!speakerLabel) continue;
+
     const recMs = Date.parse(rec.timestamp);
     if (prevMs !== null && Number.isFinite(recMs)) {
       const gap = formatGapHint(recMs - prevMs);
@@ -77,12 +113,6 @@ export function formatEventFlowWithGapHints(
       lines.push(`── ${header} ──`);
     }
 
-    const speakerLabel =
-      rec.role === "user"
-        ? "他说"
-        : rec.role === "assistant"
-          ? "我说"
-          : "独居记事";
     const cleanContent = rec.content
       .replace(/\blog-\d{4,}[-\w]*\b/gi, "")
       .replace(/\s+/g, " ")

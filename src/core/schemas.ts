@@ -71,6 +71,8 @@ export const ReflexStateSchema = z.object({
   proactive_lock: z.boolean(),
   last_sleep_settled_at: z.string().nullable().optional(),
   last_sleep_event_id: z.string().nullable().optional(),
+  last_backup_at: z.string().nullable().optional(),
+  last_backup_date: z.string().nullable().optional(),
 });
 export type ReflexState = z.infer<typeof ReflexStateSchema>;
 
@@ -140,15 +142,117 @@ export const ConcernRecordSchema = z.object({
 });
 export type ConcernRecord = z.infer<typeof ConcernRecordSchema>;
 
+export const EventProducerSchema = z.enum([
+  "user",
+  "resident",
+  "peer",
+  "system",
+  "solitary",
+  "external",
+]);
+export type EventProducer = z.infer<typeof EventProducerSchema>;
+
+export const EventSourceSchema = z.enum([
+  "chat",
+  "group",
+  "mcp_digest",
+  "import",
+  "heartbeat",
+  "solitary",
+  "system",
+]);
+export type EventSource = z.infer<typeof EventSourceSchema>;
+
+export const EventVersionStatusSchema = z.enum([
+  "active",
+  "candidate",
+  "discarded",
+]);
+export type EventVersionStatus = z.infer<typeof EventVersionStatusSchema>;
+
+export const EventAttachmentTypeSchema = z.enum([
+  "image",
+  "file",
+  "video",
+  "audio",
+]);
+export type EventAttachmentType = z.infer<typeof EventAttachmentTypeSchema>;
+
+export const EventAttachmentRecordSchema = z.object({
+  id: z.string().min(1),
+  event_id: z.string().min(1),
+  type: EventAttachmentTypeSchema,
+  path: z.string().min(1),
+  mime: z.string().nullable().optional(),
+  size_bytes: z.number().int().nonnegative().nullable().optional(),
+  hash: z.string().min(1),
+  width: z.number().int().positive().nullable().optional(),
+  height: z.number().int().positive().nullable().optional(),
+  duration_ms: z.number().int().nonnegative().nullable().optional(),
+  caption: z.string().nullable().optional(),
+});
+export type EventAttachmentRecord = z.infer<typeof EventAttachmentRecordSchema>;
+
 export const EventLogRecordSchema = z.object({
   id: z.string().regex(/^log-/),
   timestamp: z.string(),
   role: z.enum(["user", "assistant", "solitary", "system"]),
   speaker: z.string(),
   content: z.string(),
+  group_id: z.string().optional(),
+  version: z.number().int().min(1).optional(),
+  status: EventVersionStatusSchema.optional(),
+  producer: EventProducerSchema.optional(),
+  source: EventSourceSchema.optional(),
   metadata: z.record(z.unknown()).default({}),
+  attachments: z.array(EventAttachmentRecordSchema).optional(),
 });
 export type EventLogRecord = z.infer<typeof EventLogRecordSchema>;
+
+export const SystemLogActorSchema = z.enum([
+  "maker",
+  "user",
+  "agent",
+  "system",
+]);
+export type SystemLogActor = z.infer<typeof SystemLogActorSchema>;
+
+export const SystemLogKindSchema = z.enum([
+  "prompt_changed",
+  "model_changed",
+  "config_changed",
+  "spine_changed",
+  "import",
+  "migration",
+  "sleep_rollback",
+  "snapshot_rollback",
+  "message_deleted",
+  "message_edited",
+  "backup_completed",
+  "deploy",
+]);
+export type SystemLogKind = z.infer<typeof SystemLogKindSchema>;
+
+export const SystemLogRecordSchema = z.object({
+  id: z.string().min(1),
+  at: z.number().int(),
+  recorded: z.number().int(),
+  actor: SystemLogActorSchema,
+  kind: SystemLogKindSchema,
+  artifact: z.string().min(1),
+  old_hash: z.string().nullable(),
+  new_hash: z.string().nullable(),
+  reason: z.string(),
+  link: z.string().nullable(),
+});
+export type SystemLogRecord = z.infer<typeof SystemLogRecordSchema>;
+
+export const SystemMaterialRecordSchema = z.object({
+  hash: z.string().min(1),
+  content: z.string(),
+  created_at: z.string(),
+});
+export type SystemMaterialRecord = z.infer<typeof SystemMaterialRecordSchema>;
 
 export const PulseEvaluationSchema = z.object({
   event_summary: z.string(),
@@ -316,18 +420,24 @@ export const SolitaryProjectsFileSchema = z.object({
 export type SolitaryProjectsFile = z.infer<typeof SolitaryProjectsFileSchema>;
 
 const LOG_ID_LEAK_RE = /\blog-\d{4,}[-\w]*\b/i;
+const SHA256_HEX_LEAK_RE = /\b[a-f0-9]{64}\b/i;
 const HORMONE_FLOAT_LEAK_RE =
   /\b(?:cortisol|oxytocin|dopamine|melatonin|floor_cort|cap_ox|H_cort|H_ox|H_da|B_cort|B_ox|B_da|F_cort|F_ox|F_da)\b[^\n\r]{0,12}?\d+\.\d+/i;
 const RAW_FLOAT_DECIMAL_RE =
   /(?:皮质醇|催产素|多巴胺|褪黑素)[^\n\r]{0,10}?\d+\.\d+/;
 
 /**
- * 铁律守卫：前台上下文严禁裸露激素浮点数或 `log-*` 数据库主键
+ * 铁律守卫：前台上下文严禁裸露激素浮点数、`log-*` 数据库主键或 SHA-256 系统哈希
  */
 export function assertNoInternalLeaks(text: string, contextLabel = "frontstage"): void {
   if (LOG_ID_LEAK_RE.test(text)) {
     throw new Error(
       `[SovereigntyViolation:${contextLabel}] 检测到裸露的 log-* 数据库主键: ${text.match(LOG_ID_LEAK_RE)?.[0]}`,
+    );
+  }
+  if (SHA256_HEX_LEAK_RE.test(text)) {
+    throw new Error(
+      `[SovereigntyViolation:${contextLabel}] 检测到裸露的 SHA-256 内部哈希`,
     );
   }
   if (HORMONE_FLOAT_LEAK_RE.test(text) || RAW_FLOAT_DECIMAL_RE.test(text)) {

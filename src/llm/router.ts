@@ -199,12 +199,17 @@ export class OrganModelRouter {
     this.embeddingRoute = routes.embedding;
   }
 
-  getRoute(role: OrganRole): OrganModelRoute {
-    return this.routes[role];
+  setRoute(role: OrganRole, route: OrganModelRoute): {
+    oldRoute: OrganModelRoute;
+    newRoute: OrganModelRoute;
+  } {
+    const oldRoute = this.routes[role];
+    this.routes[role] = route;
+    return { oldRoute, newRoute: route };
   }
 
-  setRoute(role: OrganRole, route: OrganModelRoute): void {
-    this.routes[role] = route;
+  getRoute(role: OrganRole): OrganModelRoute {
+    return this.routes[role];
   }
 
   getEmbeddingRoute(): EmbeddingModelRoute | undefined {

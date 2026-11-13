@@ -52,6 +52,16 @@ export interface NightlyCompilerParams {
   todaysEvents?: EventLogRecord[];
   /** 可选提示词目录（缺省仓库 prompts/） */
   promptsDir?: string;
+  /** 若为 true，不立即写入 system_log (spine_changed)，改由调用方在 L1–L7 校验通过后提交 */
+  deferSpineSystemLog?: boolean;
+}
+
+export interface SpineChangePendingLog {
+  artifact: string;
+  oldContent: string | null;
+  newContent: string;
+  reason: string;
+  link: string;
 }
 
 export type SlotConflictReason =
@@ -75,6 +85,7 @@ export interface NightlyCompileResult {
   addedRapportRules: string[];
   pendingConflicts: PendingSlotConflict[];
   lintReport: LintReport;
+  pendingSpineChange?: SpineChangePendingLog;
 }
 
 const SINGLE_VALUED_SYNCHRONIC_PREDICATES = new Set([
@@ -228,6 +239,8 @@ export function appendRapportRulesToFile(params: {
   rules: RapportRuleSpec[];
   now: Date;
   sleepDate?: string;
+  deferSystemLog?: boolean;
+  onSpineChangePending?: (entry: SpineChangePendingLog) => void;
 }): string[] {
   const { memoryDir, db, rules, now, sleepDate } = params;
   if (rules.length === 0) return [];
@@ -358,6 +371,23 @@ export function appendRapportRulesToFile(params: {
       allow_forget: false,
     };
     writeUpdatedFrontmatter(rapportPath, updatedFm, parsed.content);
+    const updatedDiskContent = fs.readFileSync(rapportPath, "utf8");
+    const spineEntry: SpineChangePendingLog = {
+      artifact: `rapport:${updatedFm.id}`,
+      oldContent: initialDiskContent,
+      newContent: updatedDiskContent,
+      reason: `夜间编译更新内隐默契与变更自述（新增或修订 ${added.length} 条规则）`,
+      link: "implicit/rapport.md",
+    };
+    if (params.deferSystemLog) {
+      params.onSpineChangePending?.(spineEntry);
+    } else {
+      db.appendSystemLog({
+        actor: "agent",
+        kind: "spine_changed",
+        ...spineEntry,
+      });
+    }
   }
 
   return added;
@@ -1128,12 +1158,17 @@ export async function runNightlyCompiler(
 
   // 4. 追加新增默契与 T3 结痂雷区至 `implicit/rapport.md`
   const allRapportRules = [...scarRulesToAppend, ...plan.rapport_rules];
+  let pendingSpineChange: SpineChangePendingLog | undefined;
   const addedRules = appendRapportRulesToFile({
     memoryDir,
     db,
     rules: allRapportRules,
     now,
     sleepDate: dateStr,
+    deferSystemLog: params.deferSpineSystemLog,
+    onSpineChangePending: (entry) => {
+      pendingSpineChange = entry;
+    },
   });
   if (addedRules.length > 0) {
     addedRapportRules.push(...addedRules);
@@ -1159,5 +1194,6 @@ export async function runNightlyCompiler(
     addedRapportRules,
     pendingConflicts,
     lintReport,
+    ...(pendingSpineChange ? { pendingSpineChange } : {}),
   };
 }

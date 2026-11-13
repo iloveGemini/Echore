@@ -190,6 +190,8 @@ export class EchoreMcpServer {
       speaker: "user",
       content: input.userMessage,
       timestamp: nowIso,
+      producer: "user",
+      source: "mcp_digest",
       metadata: { source: "mcp_digest" },
     });
 
@@ -198,6 +200,8 @@ export class EchoreMcpServer {
       speaker: this.engine.profile.name,
       content: input.assistantReply,
       timestamp: nowIso,
+      producer: "external",
+      source: "mcp_digest",
       metadata: { source: "mcp_digest" },
     });
 

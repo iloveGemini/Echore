@@ -2,13 +2,22 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { type Clock, formatLocalDateStr, formatLocalTimeHm } from "../core/clock.ts";
-import type { EchoreDatabase } from "../core/db.ts";
-import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
+import { computeSha256Hex, type EchoreDatabase } from "../core/db.ts";
+import {
+  PROMPTS_DIR,
+  readPrompt,
+  seedAndSyncPromptsWithSystemLog,
+} from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
   type CompilationPlan,
   type ConcernRecord,
   type EndocrineNightVerdict,
+  type EventAttachmentRecord,
+  type EventAttachmentType,
+  type EventLogRecord,
+  type EventProducer,
+  type EventSource,
   type HormoneState,
   type PersonaConfig,
   type PulseEvaluation,
@@ -16,6 +25,8 @@ import {
   type ReflexState,
   type SolitaryActionKind,
   type SubconsciousHandover,
+  type SystemLogActor,
+  type SystemLogRecord,
   type WeatherSnapshot,
 } from "../core/schemas.ts";
 import {
@@ -42,6 +53,7 @@ import {
   appendHotJournalEntry,
   extractColdReflectionForDate,
   extractHotEntriesForDate,
+  syncInteractiveHotJournalForDate,
   synthesizeBedtimeReflection,
 } from "../frontstage/journal.ts";
 import {
@@ -82,9 +94,10 @@ import {
   type StanceBinaryVerifier,
   verifyStanceCueWithOrgan,
 } from "../hippocampus/recall.ts";
-import type { OrganModelRouter } from "../llm/router.ts";
+import type { OrganModelRoute, OrganModelRouter } from "../llm/router.ts";
 import type {
   ChatMessage,
+  OrganRole,
   SandwichRequest,
   ZodTool,
 } from "../llm/types.ts";
@@ -108,6 +121,25 @@ import {
   recordUserMessageReceived,
 } from "../reflex/guard.ts";
 
+let cachedRepoCommitHash: string | null = null;
+function resolveCurrentRepoCommitHash(): string {
+  if (cachedRepoCommitHash) return cachedRepoCommitHash;
+  try {
+    const res = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    if (res.status === 0 && res.stdout.trim()) {
+      cachedRepoCommitHash = res.stdout.trim();
+      return cachedRepoCommitHash;
+    }
+  } catch {
+    // fallback below
+  }
+  cachedRepoCommitHash = "dev-local";
+  return cachedRepoCommitHash;
+}
+
 export interface EchoreEngineOptions {
   clock: Clock;
   db: EchoreDatabase;
@@ -121,6 +153,22 @@ export interface EchoreEngineOptions {
   /** 可选注入立场锚二段复筛器（缺省按 endocrine 路由调用） */
   stanceBinaryVerifier?: StanceBinaryVerifier;
   stanceVerifyTimeoutMs?: number;
+  /** 可选显式传入当前运行版本 commit hash（用于 deploy 变更检测） */
+  commitHash?: string;
+  /** 是否在内存测试库中也强制开启凌晨 04:00-05:00 定时备份（默认文件库自动开启） */
+  enableScheduledBackup?: boolean;
+}
+
+export interface ReactiveAttachmentInput {
+  id?: string;
+  type: EventAttachmentType;
+  data: Uint8Array | string;
+  ext?: string;
+  mime?: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  caption?: string;
 }
 
 export interface ReactiveTurnOptions {
@@ -136,6 +184,19 @@ export interface ReactiveTurnOptions {
   queryEmbedding?: number[];
   stanceBinaryVerifier?: StanceBinaryVerifier;
   stanceVerifyTimeoutMs?: number;
+  /** 可选进入路径（默认 'chat'，群聊可传 'group'） */
+  source?: EventSource;
+  /** 可选本轮用户附带的多媒体附件 */
+  attachments?: ReactiveAttachmentInput[];
+}
+
+export interface SystemBackupResult {
+  backupDir: string;
+  sqliteBackupPath: string;
+  backupDate: string;
+  trigger: "scheduled_0430" | "startup_catchup" | "manual";
+  sqliteSha256: string;
+  systemLogId: string;
 }
 
 export interface WhatIfProbeScenario {
@@ -202,6 +263,7 @@ export interface HeartbeatOutput {
   proactiveEventId?: string;
   solitaryResult?: SolitaryTickResult;
   sleepCycleOutput?: SleepCycleOutput;
+  backupResult?: SystemBackupResult;
 }
 
 export interface SleepCycleOptions {
@@ -342,6 +404,7 @@ export class EchoreEngine {
   private lastUserTurnAtMs: number | null = null;
   private readonly stanceBinaryVerifier?: StanceBinaryVerifier;
   private readonly stanceVerifyTimeoutMs?: number;
+  private readonly enableScheduledBackup: boolean;
 
   constructor(options: EchoreEngineOptions) {
     this.clock = options.clock;
@@ -352,6 +415,8 @@ export class EchoreEngine {
     this.router = options.router;
     this.stanceBinaryVerifier = options.stanceBinaryVerifier;
     this.stanceVerifyTimeoutMs = options.stanceVerifyTimeoutMs;
+    this.enableScheduledBackup =
+      options.enableScheduledBackup ?? this.db.dbPath !== ":memory:";
 
     const silentWorkerTool = createSilentWorkerTool(
       this.router,
@@ -363,6 +428,30 @@ export class EchoreEngine {
       ...(options.frontstageTools ?? []),
     ];
 
+    // 1. 建立提示词基线并同步任何离线提示词改动至 system_log + system_materials
+    seedAndSyncPromptsWithSystemLog(this.db, this.promptsDir, "system");
+
+    // 2. 检测 commit hash 变化并记录 deploy 日志（不变不重复记录）
+    const currentCommit =
+      options.commitHash?.trim() || resolveCurrentRepoCommitHash();
+    const lastDeploy = this.db.getLatestSystemLogForArtifact(
+      "runtime:git_commit",
+      "deploy",
+    );
+    if (!lastDeploy || lastDeploy.link !== currentCommit) {
+      this.db.appendSystemLog({
+        actor: "system",
+        kind: "deploy",
+        artifact: "runtime:git_commit",
+        oldContent: lastDeploy?.link ?? null,
+        newContent: currentCommit,
+        reason: lastDeploy
+          ? `版本部署变更: ${lastDeploy.link} -> ${currentCommit}`
+          : `创世部署基线: ${currentCommit}`,
+        link: currentCommit,
+      });
+    }
+
     // Ensure hormone state is initialized with resolved persona baseline if brand new
     const existingLogs = this.db.getRecentEventLogs(1);
     if (existingLogs.length === 0) {
@@ -371,17 +460,87 @@ export class EchoreEngine {
         this.clock.now(),
       );
       this.db.saveHormoneState(initHormones);
+    } else {
+      this.rebuildHistoryFromDb();
+    }
+  }
+
+  private rebuildHistoryFromDb(): void {
+    const recent = this.db
+      .getRecentEventLogs(100)
+      .filter((r) => r.role === "user" || r.role === "assistant");
+    this.appendOnlyHistory.length = 0;
+    for (const r of recent) {
+      this.appendOnlyHistory.push({
+        role: r.role as "user" | "assistant",
+        content: r.content,
+      });
     }
   }
 
   /**
-   * 动态更新住户人设/内分泌原型（供性格测试台与领养流程实时切换）
+   * 重新扫描提示词目录，若文件 SHA-256 发生变化则写入 `system_log (prompt_changed)` 并归档新旧原文至 `system_materials`
+   */
+  reloadPrompts(actor: SystemLogActor = "maker"): SystemLogRecord[] {
+    return seedAndSyncPromptsWithSystemLog(this.db, this.promptsDir, actor);
+  }
+
+  /**
+   * 动态切换某器官岗位的模型路由，并写入 `system_log (model_changed)`
+   */
+  updateModelRoute(
+    role: OrganRole,
+    route: OrganModelRoute,
+    options?: { actor?: SystemLogActor; reason?: string },
+  ): SystemLogRecord {
+    const { oldRoute, newRoute } = this.router.setRoute(role, route);
+    return this.db.appendSystemLog({
+      actor: options?.actor ?? "maker",
+      kind: "model_changed",
+      artifact: `router:${role}`,
+      oldContent: `${oldRoute.provider.providerName}:${oldRoute.model}`,
+      newContent: `${newRoute.provider.providerName}:${newRoute.model}`,
+      reason:
+        options?.reason ??
+        `切换 ${role} 路由模型: ${oldRoute.model} -> ${newRoute.model}`,
+      link: `${oldRoute.model}->${newRoute.model}`,
+    });
+  }
+
+  /**
+   * 面向住户（前台）的系统变更只读查账（零数字、零主键、零哈希）
+   */
+  getSystemLogSummaryForResident(limit = 5): string {
+    return this.db.formatSystemLogForResident(limit);
+  }
+
+  /**
+   * 动态更新住户人设/内分泌原型（供性格测试台与领养流程实时切换），并写入 `system_log (config_changed)`
    */
   updatePersona(
     persona: PersonaConfig,
-    options?: { resetHormonesToBaseline?: boolean },
+    options?: {
+      resetHormonesToBaseline?: boolean;
+      actor?: SystemLogActor;
+      reason?: string;
+    },
   ): ResolvedEndocrineProfile {
+    const prevSerialized = JSON.stringify(this.profile);
     this.profile = resolvePersonaProfile(persona);
+    const nextSerialized = JSON.stringify(this.profile);
+    if (prevSerialized !== nextSerialized) {
+      this.db.appendSystemLog({
+        actor: options?.actor ?? "maker",
+        kind: "config_changed",
+        artifact: `persona:${this.profile.name}`,
+        oldContent: prevSerialized,
+        newContent: nextSerialized,
+        reason:
+          options?.reason ??
+          `更新住户人设与内分泌参数 (${this.profile.dominant_archetype} / ${this.profile.chronotype})`,
+        link: this.profile.dominant_archetype,
+      });
+    }
     if (options?.resetHormonesToBaseline) {
       const resetHormones = createInitialHormoneState(
         this.profile,
@@ -666,7 +825,11 @@ export class EchoreEngine {
     const now = this.clock.now();
     const nowIso = this.clock.nowIso();
 
+    // 用户发送下一条新消息即确认上一轮回复版本，物理清除所有未选中的 candidate 版本
+    this.db.purgeCandidateEvents();
+
     const prevReflex = this.db.getReflexState();
+    const turnSource: EventSource = options.source ?? "chat";
 
     // Step 1: 落盘 SQLite Event Log & 更新反射层
     const userEvent = this.db.appendEventLog({
@@ -674,7 +837,48 @@ export class EchoreEngine {
       speaker: "user",
       content: userMessage,
       timestamp: nowIso,
+      producer: "user",
+      source: turnSource,
     });
+
+    if (options.attachments && options.attachments.length > 0) {
+      for (const att of options.attachments) {
+        let resolvedCaption = att.caption?.trim();
+        if (!resolvedCaption && att.type === "image") {
+          try {
+            const route = this.router.getRoute("frontstage");
+            const resp = await route.provider.generate({
+              model: route.model,
+              maxTokens: 80,
+              system: "用一句简短的中文描述用户发来的图片内容概要，供后续检索。",
+              messages: [
+                {
+                  role: "user",
+                  content: `用户附带了一张图片（${att.mime ?? "image/png"}），随附文字：“${userMessage.slice(0, 80)}”`,
+                },
+              ],
+            });
+            resolvedCaption =
+              resp.text.replace(/\s+/g, " ").trim().slice(0, 100) ||
+              `与“${userMessage.slice(0, 30)}”相关的图片`;
+          } catch {
+            resolvedCaption = `与“${userMessage.slice(0, 30)}”相关的图片`;
+          }
+        }
+        this.db.addEventAttachment({
+          id: att.id,
+          eventId: userEvent.id,
+          type: att.type,
+          data: att.data,
+          ext: att.ext,
+          mime: att.mime,
+          width: att.width,
+          height: att.height,
+          durationMs: att.durationMs,
+          caption: resolvedCaption,
+        });
+      }
+    }
 
     const nextReflex = recordUserMessageReceived(prevReflex, nowIso);
     this.db.saveReflexState(nextReflex);
@@ -892,6 +1096,11 @@ export class EchoreEngine {
       speaker: this.profile.name,
       content: performance.replyText,
       timestamp: this.clock.nowIso(),
+      producer: "resident",
+      source: turnSource,
+      metadata: {
+        model: this.router.getRoute("frontstage").model,
+      },
     });
 
     // Step 5: 追加当日 journal/YYYY-MM-DD.md 第一人称热记事
@@ -976,6 +1185,17 @@ export class EchoreEngine {
         ...options.sleepCycleOptions,
         targetDateStr: targetSleepDate,
       });
+      const hour = getDecimalHour(now);
+      const calendarDateStr = formatLocalDateStr(now);
+      let backupResult: SystemBackupResult | undefined;
+      if (
+        this.enableScheduledBackup &&
+        hour >= 4.0 &&
+        hour < 5.0 &&
+        this.db.getReflexState().last_backup_date !== calendarDateStr
+      ) {
+        backupResult = this.runSystemBackup({ trigger: "scheduled_0430" });
+      }
       return {
         branch: "sleep_cycle",
         hormoneState: this.db.getHormoneState(),
@@ -984,7 +1204,23 @@ export class EchoreEngine {
         chronoAmbient,
         desktopPresence,
         sleepCycleOutput,
+        ...(backupResult ? { backupResult } : {}),
       };
+    }
+
+    // 凌晨 04:00-05:00 低峰睡后备份窗口（此时早鸟/常人/夜猫均已完成夜间睡眠编译）
+    let scheduledBackupResult: SystemBackupResult | undefined;
+    const currentHour = getDecimalHour(now);
+    const calendarDateStr = formatLocalDateStr(now);
+    if (
+      this.enableScheduledBackup &&
+      currentHour >= 4.0 &&
+      currentHour < 5.0 &&
+      this.db.getReflexState().last_backup_date !== calendarDateStr
+    ) {
+      scheduledBackupResult = this.runSystemBackup({
+        trigger: "scheduled_0430",
+      });
     }
 
     // Step 3: [意愿分流器 Arbitrator]
@@ -1100,9 +1336,12 @@ export class EchoreEngine {
         speaker: this.profile.name,
         content: proactiveMessage,
         timestamp: nowIso,
+        producer: "resident",
+        source: "heartbeat",
         metadata: {
           proactive: true,
           trigger: proactiveTrigger,
+          model: this.router.getRoute("frontstage").model,
         },
       });
 
@@ -1129,6 +1368,7 @@ export class EchoreEngine {
         proactiveTrigger,
         proactiveMessage,
         proactiveEventId: proactiveEvent.id,
+        ...(scheduledBackupResult ? { backupResult: scheduledBackupResult } : {}),
       };
     }
 
@@ -1153,11 +1393,12 @@ export class EchoreEngine {
       return {
         branch: "solitary",
         hormoneState: solitaryResult.hormoneStateAfter,
-        reflexState,
+        reflexState: this.db.getReflexState(),
         reflexEvaluation,
         chronoAmbient,
         desktopPresence,
         solitaryResult,
+        ...(scheduledBackupResult ? { backupResult: scheduledBackupResult } : {}),
       };
     }
 
@@ -1165,10 +1406,11 @@ export class EchoreEngine {
     return {
       branch: "idle",
       hormoneState: steppedHormones,
-      reflexState,
+      reflexState: this.db.getReflexState(),
       reflexEvaluation,
       chronoAmbient,
       desktopPresence,
+      ...(scheduledBackupResult ? { backupResult: scheduledBackupResult } : {}),
     };
   }
 
@@ -1188,6 +1430,9 @@ export class EchoreEngine {
       options.targetDateStr ??
       this.resolveTargetDateForSleepCycle(now) ??
       this.clock.todayStr();
+
+    // 入睡结算前物理清除任何未选中的 candidate 版本，确保被丢弃版本绝不进入编译记忆
+    this.db.purgeCandidateEvents();
 
     // 睡前原子快照（磁盘文件 + SQLite 状态表）
     const diskSnapshot = snapshotMemoryDirFiles(this.memoryDir);
@@ -1268,6 +1513,7 @@ export class EchoreEngine {
         chronotype: this.profile.chronotype,
         todaysEvents,
         promptsDir: this.promptsDir,
+        deferSpineSystemLog: true,
       });
       // Step 4: [系统] 分品类定步长衰减 + status:已沉底 归档 + L1~L8 终检 + git commit
       const decayReport = runDailyMemoryDecayAndArchive({
@@ -1312,6 +1558,13 @@ export class EchoreEngine {
           : null;
       this.db.advanceSleepCursor(this.clock.nowIso(), lastSettledEventId);
       this.db.pruneOldMemorySnapshots(7);
+      if (compileResult.pendingSpineChange) {
+        this.db.appendSystemLog({
+          actor: "agent",
+          kind: "spine_changed",
+          ...compileResult.pendingSpineChange,
+        });
+      }
 
       // Wave 5.1 睡眠环通过 L1~L7 机检后，增量回填新增/改写记忆的向量（外部网络异常安全降级，绝不触发睡眠环回滚）
       try {
@@ -1365,8 +1618,8 @@ export class EchoreEngine {
         for (const rf of reflexBackup) {
           this.db.sqlite
             .query(
-              `INSERT INTO reflex_state (id, consecutive_unanswered_proactive, last_proactive_at, last_user_message_at, proactive_lock, last_sleep_settled_at, last_sleep_event_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO reflex_state (id, consecutive_unanswered_proactive, last_proactive_at, last_user_message_at, proactive_lock, last_sleep_settled_at, last_sleep_event_id, last_backup_at, last_backup_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               rf.id as number,
@@ -1376,6 +1629,8 @@ export class EchoreEngine {
               rf.proactive_lock as number,
               (rf.last_sleep_settled_at as string | null) ?? null,
               (rf.last_sleep_event_id as string | null) ?? null,
+              (rf.last_backup_at as string | null) ?? null,
+              (rf.last_backup_date as string | null) ?? null,
             );
         }
         this.db.sqlite.exec("DELETE FROM concerns;");
@@ -1459,6 +1714,13 @@ export class EchoreEngine {
         }
       });
       rollbackTx();
+      this.db.appendSystemLog({
+        actor: "system",
+        kind: "sleep_rollback",
+        artifact: `sleep_cycle:${dateStr}`,
+        reason: err instanceof Error ? err.message : String(err),
+        link: dateStr,
+      });
       throw err;
     }
   }
@@ -1562,10 +1824,23 @@ export class EchoreEngine {
     }
 
     const absPath = path.join(this.memoryDir, snap.rel_path);
+    const currentDiskBefore = fs.existsSync(absPath)
+      ? fs.readFileSync(absPath, "utf8")
+      : null;
+
     if (snap.is_creation) {
       fs.rmSync(absPath, { force: true });
       this.db.deleteMemoryMeta(memoryId);
       this.db.deleteMemorySnapshot(sleepDate, memoryId);
+      this.db.appendSystemLog({
+        actor: "maker",
+        kind: "snapshot_rollback",
+        artifact: `memory:${memoryId}`,
+        oldContent: currentDiskBefore,
+        newContent: null,
+        reason: `回滚并删除当夜新建记忆快照 (${sleepDate} · ${snap.rel_path})`,
+        link: `${sleepDate}:${memoryId}`,
+      });
       return {
         restored: true,
         action: "deleted_creation",
@@ -1584,10 +1859,422 @@ export class EchoreEngine {
       });
     }
     this.db.deleteMemorySnapshot(sleepDate, memoryId);
+    this.db.appendSystemLog({
+      actor: "maker",
+      kind: "snapshot_rollback",
+      artifact: `memory:${memoryId}`,
+      oldContent: currentDiskBefore,
+      newContent: snap.original_content,
+      reason: `回滚恢复单条记忆快照 (${sleepDate} · ${snap.rel_path})`,
+      link: `${sleepDate}:${memoryId}`,
+    });
     return {
       restored: true,
       action: "restored_content",
       relPath: snap.rel_path,
     };
+  }
+
+  /**
+   * §9.4.1 删除本条及之后所有消息：
+   * - 同步清理 `event_log`、`event_log_fts`、附件引用计数与内存 `appendOnlyHistory`；
+   * - 若为未过夜消息，同步撤回该轮产生的 `concerns` 并重整当日 `journal/YYYY-MM-DD.md` 交互热记事；
+   * - 若为已过夜消息，记录 `message_deleted` 进 `system_log`（不含正文），Linter L5 自动将失去来源的断言降级为孤儿 warning。
+   */
+  deleteMessagesFrom(
+    targetEventId: string,
+    options?: {
+      actor?: SystemLogActor;
+      reason?: string;
+      purgeCompiledMemories?: boolean;
+    },
+  ): {
+    deletedIds: string[];
+    deletedCount: number;
+    crossedSleepCursor: boolean;
+    newSleepCursorId: string | null;
+    hasSettledHistoryDeleted: boolean;
+    withdrawnConcernIds: string[];
+  } {
+    const res = this.db.deleteEventsFromId(targetEventId, options);
+    if (res.deletedCount === 0) {
+      return {
+        ...res,
+        withdrawnConcernIds: [],
+      };
+    }
+
+    const withdrawnConcernIds = this.db.deleteConcernsBySourceEventIds(
+      res.deletedIds,
+    );
+    this.rebuildHistoryFromDb();
+
+    const datesToSync = new Set<string>([
+      ...res.affectedDates,
+      ...res.affectedTimestamps.map((ts) =>
+        this.getCircadianDateStr(new Date(ts)),
+      ),
+      this.getCircadianDateStr(this.clock.now()),
+    ]);
+    for (const d of datesToSync) {
+      if (!this.isDateSleepClosed(d)) {
+        const activeEvents = this.db.getEventLogsByDate(
+          d,
+          this.profile.chronotype,
+        );
+        syncInteractiveHotJournalForDate({
+          memoryDir: this.memoryDir,
+          dateStr: d,
+          activeDateEvents: activeEvents,
+        });
+      }
+    }
+
+    if (options?.purgeCompiledMemories) {
+      const deletedSet = new Set(res.deletedIds);
+      for (const sub of ["events", "concerns"] as const) {
+        const dir = path.join(this.memoryDir, sub);
+        if (!fs.existsSync(dir)) continue;
+        for (const f of fs.readdirSync(dir)) {
+          if (!f.endsWith(".md")) continue;
+          const full = path.join(dir, f);
+          const text = fs.readFileSync(full, "utf8");
+          const m = text.match(/^source_event_id:\s*(\S+)\s*$/m);
+          if (m?.[1] && deletedSet.has(m[1])) {
+            fs.rmSync(full, { force: true });
+          }
+        }
+      }
+      syncMemoryMetaFromFiles({
+        memoryDir: this.memoryDir,
+        db: this.db,
+        now: this.clock.now(),
+      });
+    }
+
+    return {
+      ...res,
+      withdrawnConcernIds,
+    };
+  }
+
+  /**
+   * §9.4.2 Reroll 最后一条住户回复（当下重生成，当前选中即 `active`，其余为 `candidate`）
+   */
+  async rerollLastAssistantReply(options?: {
+    overrideReplyText?: string;
+    modelRouteOverride?: OrganModelRoute;
+  }): Promise<{
+    event: EventLogRecord;
+    groupId: string;
+    version: number;
+    versions: EventLogRecord[];
+  }> {
+    const recentActive = this.db.getRecentEventLogs(10);
+    if (recentActive.length === 0) {
+      throw new Error("当前没有可重生成的对话消息");
+    }
+    const lastActive = recentActive[recentActive.length - 1]!;
+    const lastProducer =
+      lastActive.producer ??
+      (lastActive.role === "assistant" ? "resident" : lastActive.role);
+    if (lastActive.role !== "assistant" || lastProducer !== "resident") {
+      throw new Error("只能对最后一条住户回复执行 Reroll");
+    }
+
+    const groupId = lastActive.group_id ?? lastActive.id;
+    const existingVersions = this.db.getEventVersionsByGroupId(groupId);
+    const maxVersion = existingVersions.reduce(
+      (max, v) => Math.max(max, v.version ?? 1),
+      1,
+    );
+    const nextVersion = maxVersion + 1;
+
+    // Locate the preceding user message
+    let userEvent: EventLogRecord | null = null;
+    for (let i = recentActive.length - 2; i >= 0; i--) {
+      if (
+        recentActive[i]!.role === "user" ||
+        recentActive[i]!.producer === "user"
+      ) {
+        userEvent = recentActive[i]!;
+        break;
+      }
+    }
+
+    const effectiveRoute =
+      options?.modelRouteOverride ?? this.router.getRoute("frontstage");
+    let replyText = options?.overrideReplyText?.trim() ?? "";
+
+    if (!replyText) {
+      const now = this.clock.now();
+      const activeConcerns = this.db.listActiveConcerns();
+      const handover = buildSubconsciousHandover({
+        hormoneState: this.db.getHormoneState(),
+        profile: this.profile,
+        activeConcerns,
+        db: this.db,
+        now,
+      });
+      const userQuery = userEvent?.content ?? "";
+      const recalled = recallMemories({
+        memoryDir: this.memoryDir,
+        db: this.db,
+        query: userQuery,
+        now,
+        activeConcerns,
+      });
+      const isProactive =
+        lastActive.source === "heartbeat" ||
+        lastActive.metadata?.proactive === true;
+      const sliceCount = isProactive ? 1 : 2;
+      const historyBeforeLastTurn =
+        this.appendOnlyHistory.length >= sliceCount
+          ? this.appendOnlyHistory.slice(0, -sliceCount)
+          : [];
+      const tempRouter = options?.modelRouteOverride
+        ? ({
+            getRoute: (r: OrganRole) =>
+              r === "frontstage"
+                ? options.modelRouteOverride!
+                : this.router.getRoute(r),
+          } as OrganModelRouter)
+        : this.router;
+
+      const perf = await performFrontstageTurn({
+        router: tempRouter,
+        profile: this.profile,
+        rawRapportMarkdown: this.loadRapportMarkdown(),
+        tools: this.frontstageTools,
+        appendOnlyHistory: historyBeforeLastTurn,
+        handover,
+        recallResult: recalled,
+        latestUserMessage: userQuery,
+        promptsDir: this.promptsDir,
+      });
+      replyText = perf.replyText;
+    }
+
+    assertNoInternalLeaks(replyText, "rerollLastAssistantReply");
+
+    const preservedMeta: Record<string, unknown> = {};
+    if (lastActive.metadata?.proactive !== undefined) {
+      preservedMeta.proactive = lastActive.metadata.proactive;
+    }
+    if (lastActive.metadata?.trigger !== undefined) {
+      preservedMeta.trigger = lastActive.metadata.trigger;
+    }
+    if (lastActive.metadata?.room_id !== undefined) {
+      preservedMeta.room_id = lastActive.metadata.room_id;
+    }
+
+    let newEvent!: EventLogRecord;
+    const rerollTx = this.db.sqlite.transaction(() => {
+      for (const v of existingVersions) {
+        this.db.sqlite
+          .query(`UPDATE event_log SET status = 'candidate' WHERE id = ?`)
+          .run(v.id);
+        this.db.syncEventFtsForId(v.id);
+      }
+
+      newEvent = this.db.appendEventLog({
+        role: "assistant",
+        speaker: this.profile.name,
+        content: replyText,
+        timestamp: lastActive.timestamp,
+        groupId,
+        version: nextVersion,
+        status: "active",
+        producer: "resident",
+        source: lastActive.source ?? "chat",
+        metadata: {
+          ...preservedMeta,
+          model: effectiveRoute.model,
+        },
+      });
+    });
+    rerollTx();
+
+    this.rebuildHistoryFromDb();
+    const circadianDate = this.getCircadianDateStr(
+      new Date(lastActive.timestamp),
+    );
+    if (!this.isDateSleepClosed(circadianDate)) {
+      syncInteractiveHotJournalForDate({
+        memoryDir: this.memoryDir,
+        dateStr: circadianDate,
+        activeDateEvents: this.db.getEventLogsByDate(
+          circadianDate,
+          this.profile.chronotype,
+        ),
+      });
+    }
+
+    return {
+      event: newEvent,
+      groupId,
+      version: nextVersion,
+      versions: this.db.getEventVersionsByGroupId(groupId),
+    };
+  }
+
+  /**
+   * §9.4.2 在同一 `group_id` 的多个 Reroll 版本间切换当前选中版本（`active`）
+   */
+  switchMessageVersion(
+    groupId: string,
+    targetVersion: number,
+  ): EventLogRecord {
+    const switched = this.db.switchActiveEventVersion(groupId, targetVersion);
+    if (!switched) {
+      throw new Error(
+        `未找到 group_id=${groupId} 的 version=${targetVersion} 候选版本`,
+      );
+    }
+    this.rebuildHistoryFromDb();
+    const circadianDate = this.getCircadianDateStr(
+      new Date(switched.timestamp),
+    );
+    if (!this.isDateSleepClosed(circadianDate)) {
+      syncInteractiveHotJournalForDate({
+        memoryDir: this.memoryDir,
+        dateStr: circadianDate,
+        activeDateEvents: this.db.getEventLogsByDate(
+          circadianDate,
+          this.profile.chronotype,
+        ),
+      });
+    }
+    return switched;
+  }
+
+  /**
+   * §9.4.3 编辑最近一条且尚无住户回复的用户消息（只记 `message_edited` 事实，不留旧文）
+   */
+  editLastUserMessage(
+    targetEventId: string,
+    newContent: string,
+    options?: { actor?: SystemLogActor; reason?: string },
+  ): EventLogRecord {
+    const updated = this.db.editLastUnrepliedUserEvent(
+      targetEventId,
+      newContent,
+      options,
+    );
+    this.rebuildHistoryFromDb();
+    return updated;
+  }
+
+  /**
+   * §9.5 执行 SQLite `VACUUM INTO` 整库快照 + `memoryDir` / `media` 一致性备份，并写入 `system_log (backup_completed)`
+   */
+  runSystemBackup(options?: {
+    trigger?: "scheduled_0430" | "startup_catchup" | "manual";
+    backupRootDir?: string;
+  }): SystemBackupResult {
+    const now = this.clock.now();
+    const nowIso = this.clock.nowIso();
+    const backupDate = formatLocalDateStr(now);
+    const trigger = options?.trigger ?? "manual";
+    const backupRoot =
+      options?.backupRootDir ?? path.join(this.db.dataDir, "backups");
+    const backupDir = path.join(backupRoot, backupDate);
+    fs.mkdirSync(backupDir, { recursive: true });
+
+    const sqliteBackupPath = path.join(backupDir, "echore.sqlite");
+    fs.rmSync(sqliteBackupPath, { force: true });
+    const escapedPath = sqliteBackupPath.replace(/'/g, "''");
+    this.db.sqlite.exec(`VACUUM INTO '${escapedPath}';`);
+
+    if (fs.existsSync(this.memoryDir)) {
+      const targetMemDir = path.join(backupDir, "memory");
+      fs.rmSync(targetMemDir, { recursive: true, force: true });
+      fs.cpSync(this.memoryDir, targetMemDir, { recursive: true });
+    }
+
+    const mediaDir = path.join(this.db.dataDir, "media");
+    if (fs.existsSync(mediaDir)) {
+      const targetMediaDir = path.join(backupDir, "media");
+      fs.rmSync(targetMediaDir, { recursive: true, force: true });
+      fs.cpSync(mediaDir, targetMediaDir, { recursive: true });
+    }
+
+    const sqliteBytes = fs.readFileSync(sqliteBackupPath);
+    const sqliteSha256 = computeSha256Hex(sqliteBytes);
+
+    fs.writeFileSync(
+      path.join(backupDir, "manifest.json"),
+      JSON.stringify(
+        {
+          backupDate,
+          createdAt: nowIso,
+          trigger,
+          sqliteSha256,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    this.db.recordBackupCompleted(nowIso, backupDate);
+    const logRecord = this.db.appendSystemLog({
+      actor: "system",
+      kind: "backup_completed",
+      artifact: `backup:${backupDate}`,
+      newHash: sqliteSha256,
+      reason: `完成整库与记忆备份 (trigger: ${trigger})`,
+      link: backupDir,
+    });
+
+    return {
+      backupDir,
+      sqliteBackupPath,
+      backupDate,
+      trigger,
+      sqliteSha256,
+      systemLogId: logRecord.id,
+    };
+  }
+
+  /**
+   * §9.5 服务启动前预检补备：
+   * 若存在历史数据且此前从未备份、或上次备份日期早于今日（如凌晨 04:30 关机漏备）、或距上次备份 >= maxStaleHours，
+   * 立即同步补跑一次 `startup_catchup` 备份再对外提供服务。
+   */
+  ensureStartupBackup(options?: {
+    backupRootDir?: string;
+    maxStaleHours?: number;
+  }): { backedUp: boolean; result?: SystemBackupResult } {
+    const reflex = this.db.getReflexState();
+    const todayStr = formatLocalDateStr(this.clock.now());
+    const nowMs = this.clock.nowMs();
+    const maxStaleMs = (options?.maxStaleHours ?? 20) * 3600_000;
+
+    const hasEvents = this.db.getRecentEventLogs(1).length > 0;
+    const hasMemories = this.db.listAllMemoryMeta().length > 0;
+    if (!hasEvents && !hasMemories && !reflex.last_backup_date) {
+      return { backedUp: false };
+    }
+
+    const neverBackedUp = !reflex.last_backup_date;
+    const missedPreviousDay =
+      reflex.last_backup_date !== null &&
+      reflex.last_backup_date !== undefined &&
+      reflex.last_backup_date < todayStr;
+    const staleByHours =
+      reflex.last_backup_at !== null &&
+      reflex.last_backup_at !== undefined &&
+      nowMs - Date.parse(reflex.last_backup_at) >= maxStaleMs;
+
+    if (neverBackedUp || missedPreviousDay || staleByHours) {
+      const result = this.runSystemBackup({
+        trigger: "startup_catchup",
+        backupRootDir: options?.backupRootDir,
+      });
+      return { backedUp: true, result };
+    }
+
+    return { backedUp: false };
   }
 }

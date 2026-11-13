@@ -474,12 +474,21 @@ export function runMemoryLinter(params: {
           message: `L5 Error: [${frontmatter.id}] 缺失合法的 source_event_id 原文指针`,
         });
       } else if (!db.getEventLogById(srcId)) {
-        issues.push({
-          rule: "L5",
-          severity: "error",
-          file: relPath,
-          message: `L5 Error: [${frontmatter.id}] 的 source_event_id [${srcId}] 在 SQLite Event Log 中不存在`,
-        });
+        if (db.isEventIdDeletedInSystemLog(srcId)) {
+          issues.push({
+            rule: "L5",
+            severity: "warning",
+            file: relPath,
+            message: `L5 Warning (orphaned_by_deletion): [${frontmatter.id}] 的 source_event_id [${srcId}] 对应原始消息已被删除，标为孤儿记忆`,
+          });
+        } else {
+          issues.push({
+            rule: "L5",
+            severity: "error",
+            file: relPath,
+            message: `L5 Error: [${frontmatter.id}] 的 source_event_id [${srcId}] 在 SQLite Event Log 中不存在`,
+          });
+        }
       }
     } else if (relPath === "implicit/rapport.md") {
       for (const line of lines) {
@@ -496,12 +505,21 @@ export function runMemoryLinter(params: {
         } else {
           const logId = srcMatch[1]!.trim();
           if (!db.getEventLogById(logId)) {
-            issues.push({
-              rule: "L5",
-              severity: "error",
-              file: relPath,
-              message: `L5 Error: rapport.md 引用的 [${logId}] 在 SQLite Event Log 中不存在`,
-            });
+            if (db.isEventIdDeletedInSystemLog(logId)) {
+              issues.push({
+                rule: "L5",
+                severity: "warning",
+                file: relPath,
+                message: `L5 Warning (orphaned_by_deletion): rapport.md 引用的 [${logId}] 对应原始消息已被删除，标为孤儿规则`,
+              });
+            } else {
+              issues.push({
+                rule: "L5",
+                severity: "error",
+                file: relPath,
+                message: `L5 Error: rapport.md 引用的 [${logId}] 在 SQLite Event Log 中不存在`,
+              });
+            }
           }
         }
       }

@@ -37,6 +37,8 @@ export interface CompanionMessageItem {
   speaker: string;
   content: string;
   timestamp: string;
+  producer?: string;
+  source?: string;
   proactive?: boolean;
 }
 
@@ -198,6 +200,8 @@ export function createEchoreHttpApp(options: {
       speaker: r.speaker,
       content: r.content.replace(/\blog-\d{4,}[-\w]*\b/gi, "").trim(),
       timestamp: r.timestamp,
+      producer: r.producer,
+      source: r.source,
       ...(r.metadata?.proactive ? { proactive: true } : {}),
     }));
 
@@ -256,6 +260,9 @@ export function createEchoreHttpApp(options: {
       now,
     });
     const memorySnapshots = engine.db.listMemorySnapshots();
+    const systemLogs = engine.db.listSystemLogs({ limit: 50 });
+    const configEpoch = engine.db.getConfigEpoch();
+    const recentEvents = engine.db.getRecentEventLogs(40);
 
     return {
       clock: {
@@ -275,6 +282,9 @@ export function createEchoreHttpApp(options: {
       todayColdReflection,
       lintReport,
       memorySnapshots,
+      systemLogs,
+      configEpoch,
+      recentEvents,
     };
   };
 
@@ -287,8 +297,20 @@ export function createEchoreHttpApp(options: {
     const pathname = url.pathname;
 
     try {
-      // 1. SSE 实时事件流: GET /api/events
+      // 1. SSE 实时事件流 或 JSON 事件列表: GET /api/events
       if (req.method === "GET" && pathname === "/api/events") {
+        const accept = req.headers.get("accept") ?? "";
+        if (
+          url.searchParams.get("format") === "json" ||
+          (accept.includes("application/json") &&
+            !accept.includes("text/event-stream"))
+        ) {
+          const limit = Number(url.searchParams.get("limit") || 40);
+          return jsonResponse({
+            configEpoch: engine.db.getConfigEpoch(),
+            events: engine.db.getRecentEventLogs(limit),
+          });
+        }
         const encoder = new TextEncoder();
         let subscriberFn: ((chunk: string) => void) | null = null;
 
@@ -556,6 +578,117 @@ export function createEchoreHttpApp(options: {
         return jsonResponse(result);
       }
 
+      // 9.7 观测台：系统元事件日志与原文存档: GET /api/observatory/system-log
+      if (req.method === "GET" && pathname === "/api/observatory/system-log") {
+        const materialHash = url.searchParams.get("materialHash")?.trim();
+        if (materialHash) {
+          return jsonResponse({
+            material: engine.db.getSystemMaterial(materialHash),
+          });
+        }
+        const limit = Number(url.searchParams.get("limit") || 100);
+        return jsonResponse({
+          configEpoch: engine.db.getConfigEpoch(),
+          logs: engine.db.listSystemLogs({ limit }),
+          residentSummary: engine.getSystemLogSummaryForResident(5),
+        });
+      }
+
+      // 9.8 消息操作：删除本条及之后所有消息: POST /api/chat/delete
+      if (req.method === "POST" && pathname === "/api/chat/delete") {
+        const rawBody = await req.json();
+        const DeleteBodySchema = z.object({
+          eventId: z.string().min(1),
+          reason: z.string().optional(),
+          purgeCompiledMemories: z.boolean().optional(),
+        });
+        const parsed = DeleteBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid delete body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const result = engine.deleteMessagesFrom(parsed.data.eventId, {
+          reason: parsed.data.reason,
+          purgeCompiledMemories: parsed.data.purgeCompiledMemories,
+        });
+        return jsonResponse(result);
+      }
+
+      // 9.9 消息操作：Reroll 最后一条住户回复: POST /api/chat/reroll
+      if (req.method === "POST" && pathname === "/api/chat/reroll") {
+        let rawBody: unknown = {};
+        const text = await req.text();
+        if (text.trim()) {
+          rawBody = JSON.parse(text);
+        }
+        const RerollBodySchema = z
+          .object({
+            overrideReplyText: z.string().optional(),
+          })
+          .optional();
+        const parsed = RerollBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid reroll body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const result = await engine.rerollLastAssistantReply(parsed.data ?? {});
+        return jsonResponse(result);
+      }
+
+      // 9.10 消息操作：切换同组 Reroll 版本: POST /api/chat/version
+      if (req.method === "POST" && pathname === "/api/chat/version") {
+        const rawBody = await req.json();
+        const VersionBodySchema = z.object({
+          groupId: z.string().min(1),
+          version: z.number().int().min(1),
+        });
+        const parsed = VersionBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid version body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const switched = engine.switchMessageVersion(
+          parsed.data.groupId,
+          parsed.data.version,
+        );
+        return jsonResponse({ event: switched });
+      }
+
+      // 9.11 消息操作：编辑最近一条未回复的用户消息: POST /api/chat/edit
+      if (req.method === "POST" && pathname === "/api/chat/edit") {
+        const rawBody = await req.json();
+        const EditBodySchema = z.object({
+          eventId: z.string().min(1),
+          content: z.string().min(1),
+          reason: z.string().optional(),
+        });
+        const parsed = EditBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid edit body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const updated = engine.editLastUserMessage(
+          parsed.data.eventId,
+          parsed.data.content,
+          { reason: parsed.data.reason },
+        );
+        return jsonResponse({ event: updated });
+      }
+
+      // 9.12 观测台：手动触发整库与记忆备份: POST /api/observatory/backup
+      if (req.method === "POST" && pathname === "/api/observatory/backup") {
+        const result = engine.runSystemBackup({ trigger: "manual" });
+        return jsonResponse(result);
+      }
+
       // 10. 极轻静态文件托管（开发者联调与性格测试台）
       if (req.method === "GET" && !pathname.startsWith("/api/")) {
         const MIME_TYPES: Record<string, string> = {
@@ -610,7 +743,11 @@ export function startEchoreHttpServer(options: {
   port?: number;
   hostname?: string;
   staticDir?: string;
+  skipStartupBackupCheck?: boolean;
 }) {
+  if (!options.skipStartupBackupCheck) {
+    options.engine.ensureStartupBackup();
+  }
   const app = createEchoreHttpApp({
     engine: options.engine,
     simulator: options.simulator,
