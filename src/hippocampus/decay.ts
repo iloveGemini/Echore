@@ -14,7 +14,11 @@ import {
   type ParsedMemoryFile,
   parseStructuredMemoryFile,
 } from "./linter.ts";
-import type { RecalledMemoryItem } from "./recall.ts";
+import type { OrganModelRouter } from "../llm/router.ts";
+import {
+  buildMemoryEmbeddingText,
+  type RecalledMemoryItem,
+} from "./recall.ts";
 
 export const INITIAL_MEMORY_STRENGTH = 0.75;
 export const NAIL_MEMORY_STRENGTH = 0.90;
@@ -219,6 +223,89 @@ export function syncMemoryMetaFromFiles(params: {
   }
 
   return files;
+}
+
+export interface HydrateEmbeddingsReport {
+  embeddedIds: string[];
+  skippedCount: number;
+}
+
+/**
+ * Wave 5.1 记忆向量增量回填：
+ * - 先同步磁盘 `.md` 到 `memory_meta`（若 `when_to_recall` 或正文变更，`syncMemoryMetaFromFiles` 已自动清空旧 `embedding_json`）；
+ * - 筛选活跃态（`有效` / `僵持待解`，排除 INDEX / rapport.md / people/）且 `embedding` 为空的记忆；
+ * - 按 `buildMemoryEmbeddingText(file)` (`when_to_recall ? `${when_to_recall}\n${summary}` : summary`) 批量向量化并写回 `memory_meta`。
+ */
+export async function hydrateMissingMemoryEmbeddings(params: {
+  memoryDir: string;
+  db: EchoreDatabase;
+  router?: OrganModelRouter;
+  now: Date;
+}): Promise<HydrateEmbeddingsReport> {
+  const { memoryDir, db, router, now } = params;
+  if (!router?.getEmbeddingRoute()) {
+    return { embeddedIds: [], skippedCount: 0 };
+  }
+
+  const files = syncMemoryMetaFromFiles({ memoryDir, db, now });
+  const pending: Array<{
+    file: ParsedMemoryFile;
+    meta: MemoryMetaRecord;
+    text: string;
+  }> = [];
+  let skippedCount = 0;
+
+  for (const file of files) {
+    if (
+      file.relPath === "INDEX.md" ||
+      file.relPath === "implicit/rapport.md" ||
+      file.relPath.startsWith("people/") ||
+      (file.frontmatter.status !== "有效" &&
+        file.frontmatter.status !== "僵持待解")
+    ) {
+      continue;
+    }
+    const meta = db.getMemoryMeta(file.frontmatter.id);
+    if (!meta) continue;
+    if (meta.embedding && meta.embedding.length > 0) {
+      skippedCount += 1;
+      continue;
+    }
+    const text = buildMemoryEmbeddingText(file).trim();
+    if (!text) {
+      skippedCount += 1;
+      continue;
+    }
+    pending.push({ file, meta, text });
+  }
+
+  if (pending.length === 0) {
+    return { embeddedIds: [], skippedCount };
+  }
+
+  const vectors = await router.embedTexts(pending.map((p) => p.text));
+  if (!vectors) {
+    return { embeddedIds: [], skippedCount: skippedCount + pending.length };
+  }
+
+  const nowIso = now.toISOString();
+  const embeddedIds: string[] = [];
+  for (let i = 0; i < pending.length; i++) {
+    const item = pending[i]!;
+    const vec = vectors[i];
+    if (!Array.isArray(vec) || vec.length === 0) {
+      skippedCount += 1;
+      continue;
+    }
+    db.upsertMemoryMeta({
+      ...item.meta,
+      embedding: vec,
+      updated_at: nowIso,
+    });
+    embeddedIds.push(item.file.frontmatter.id);
+  }
+
+  return { embeddedIds, skippedCount };
 }
 
 /**

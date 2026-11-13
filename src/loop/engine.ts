@@ -61,6 +61,7 @@ import {
 } from "../hippocampus/compiler.ts";
 import {
   type DecayArchiveReport,
+  hydrateMissingMemoryEmbeddings,
   type RecallBatchSnapshot,
   reconsolidateRecalledMemories,
   recordMemoryTransitions,
@@ -73,6 +74,7 @@ import {
   runMemoryLinter,
 } from "../hippocampus/linter.ts";
 import {
+  embedQueryWithOrgan,
   isIdleQuery,
   isStanceCue,
   type RecallResult,
@@ -130,6 +132,8 @@ export interface ReactiveTurnOptions {
   userActiveLateNight?: boolean;
   /** 可选注入情绪官脉冲评估结果（或由 endocrine 路由模型自动评估） */
   pulseOverride?: Partial<PulseEvaluation>;
+  /** 可选直接注入本轮查询向量（缺省在配置了 embedding 路由时自动计算） */
+  queryEmbedding?: number[];
   stanceBinaryVerifier?: StanceBinaryVerifier;
   stanceVerifyTimeoutMs?: number;
 }
@@ -421,6 +425,25 @@ export class EchoreEngine {
           yesterdayClosed: yesterdayHot.length === 0,
         });
       }
+      // 跨午夜作息 (regular / night_owl)：若已进入睡眠锁至晨起窗口且昨日既无热记事也无昨日未结转事件（如新住户首日），直接归属今日
+      if (hour >= schedule.sleepLockStartHour) {
+        const yesterdayHot = extractHotEntriesForDate(
+          this.memoryDir,
+          yesterdayStr,
+        );
+        if (yesterdayHot.length === 0) {
+          const unsettledEvents = this.db.getUnsettledEventLogs(
+            yesterdayStr,
+            this.profile.chronotype,
+          );
+          const hasYesterdayEvents = unsettledEvents.some(
+            (e) => formatLocalDateStr(e.timestamp) <= yesterdayStr,
+          );
+          if (!hasYesterdayEvents) {
+            return formatLocalDateStr(date);
+          }
+        }
+      }
       return getCircadianDateStr(date, this.profile.chronotype, {
         yesterdayClosed: false,
       });
@@ -711,24 +734,36 @@ export class EchoreEngine {
     }
     this.lastUserTurnAtMs = now.getTime();
 
-    let stanceCueOverride: boolean | undefined;
-    if (!isIdleQuery(userMessage) && isStanceCue(userMessage)) {
-      let lastAssistantReply = "";
-      for (let i = this.appendOnlyHistory.length - 1; i >= 0; i--) {
-        if (this.appendOnlyHistory[i]?.role === "assistant") {
-          lastAssistantReply = this.appendOnlyHistory[i]!.content;
-          break;
-        }
-      }
-      stanceCueOverride = await verifyStanceCueWithOrgan({
-        userMessage,
-        lastAssistantReply,
-        router: this.router,
-        verifier: options.stanceBinaryVerifier ?? this.stanceBinaryVerifier,
-        timeoutMs: options.stanceVerifyTimeoutMs ?? this.stanceVerifyTimeoutMs,
-        promptsDir: this.promptsDir,
-      });
-    }
+    const idleQuery = isIdleQuery(userMessage);
+    const [stanceCueOverride, queryEmbedding] = await Promise.all([
+      !idleQuery && isStanceCue(userMessage)
+        ? (() => {
+            let lastAssistantReply = "";
+            for (let i = this.appendOnlyHistory.length - 1; i >= 0; i--) {
+              if (this.appendOnlyHistory[i]?.role === "assistant") {
+                lastAssistantReply = this.appendOnlyHistory[i]!.content;
+                break;
+              }
+            }
+            return verifyStanceCueWithOrgan({
+              userMessage,
+              lastAssistantReply,
+              router: this.router,
+              verifier:
+                options.stanceBinaryVerifier ?? this.stanceBinaryVerifier,
+              timeoutMs:
+                options.stanceVerifyTimeoutMs ?? this.stanceVerifyTimeoutMs,
+              promptsDir: this.promptsDir,
+            });
+          })()
+        : Promise.resolve(undefined),
+      options.queryEmbedding !== undefined
+        ? Promise.resolve(options.queryEmbedding)
+        : embedQueryWithOrgan({
+            query: userMessage,
+            router: this.router,
+          }),
+    ]);
 
     const recalled = recallMemories({
       memoryDir: this.memoryDir,
@@ -736,6 +771,7 @@ export class EchoreEngine {
       query: userMessage,
       now,
       activeConcerns: activeConcernsBefore,
+      queryEmbedding,
       recentSessionRecalledIds: new Set(this.recentSessionRecalledIds),
       excludeEventIds: new Set([userEvent.id]),
       stanceCueOverride,
@@ -1272,6 +1308,18 @@ export class EchoreEngine {
       this.db.advanceSleepCursor(this.clock.nowIso(), lastSettledEventId);
       this.db.pruneOldMemorySnapshots(7);
 
+      // Wave 5.1 睡眠环通过 L1~L7 机检后，增量回填新增/改写记忆的向量（外部网络异常安全降级，绝不触发睡眠环回滚）
+      try {
+        await hydrateMissingMemoryEmbeddings({
+          memoryDir: this.memoryDir,
+          db: this.db,
+          router: this.router,
+          now,
+        });
+      } catch {
+        // Ignore external embedding errors during sleep cycle tail
+      }
+
       const gitCommitHash =
         options.autoGitCommit !== false
           ? commitStandaloneMemoryRepo(this.memoryDir, dateStr)
@@ -1391,6 +1439,28 @@ export class EchoreEngine {
       rollbackTx();
       throw err;
     }
+  }
+
+  /**
+   * 为 `probeWhatIf` 在进入同步 `SAVEPOINT` 之前预计算可选的 `queryEmbedding`，
+   * 保证 `probeWhatIf` 内部 100% 同步零 `await`。
+   */
+  async prepareWhatIfScenario(
+    scenario: WhatIfProbeScenario = {},
+  ): Promise<WhatIfProbeScenario> {
+    if (
+      scenario.userMessage !== undefined &&
+      scenario.queryEmbedding === undefined
+    ) {
+      const queryEmbedding = await embedQueryWithOrgan({
+        query: scenario.userMessage,
+        router: this.router,
+      });
+      if (queryEmbedding) {
+        return { ...scenario, queryEmbedding };
+      }
+    }
+    return scenario;
   }
 
   /**

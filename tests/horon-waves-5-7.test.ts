@@ -10,6 +10,7 @@ import {
   sanitizeWhenToRecall,
 } from "../src/hippocampus/compiler.ts";
 import {
+  hydrateMissingMemoryEmbeddings,
   PASSIVE_TRANSITION_STEP,
   type RecallBatchSnapshot,
   recordMemoryTransitions,
@@ -22,11 +23,13 @@ import {
   runMemoryLinter,
 } from "../src/hippocampus/linter.ts";
 import {
+  buildMemoryEmbeddingText,
   isStanceCue,
   recallMemories,
   verifyStanceCueWithOrgan,
 } from "../src/hippocampus/recall.ts";
 import { replaceUniqueNormalizedFragment } from "../src/hippocampus/text-patch.ts";
+import { OpenAICompatAdapter } from "../src/llm/openai-compat.ts";
 import { OrganModelRouter } from "../src/llm/router.ts";
 import type {
   LLMGenerateParams,
@@ -332,6 +335,144 @@ describe("Wave 5.1: 触发情境书腰 (when_to_recall)", () => {
     });
     syncMemoryMetaFromFiles({ memoryDir, db, now: clock.now() });
     expect(db.getMemoryMeta("evt-dripper")?.embedding).toBeUndefined();
+  });
+
+  test("end-to-end vector path: OpenAICompatAdapter.embed hydrates `${when_to_recall}\\n${summary}` in sleep cycle and recalls zero-lexical-overlap memory in onUserMessage & what-if", async () => {
+    const { memoryDir, clock, db } = createTempWorkspace("2026-11-13T16:00:00");
+    const ev = db.appendEventLog({
+      role: "user",
+      speaker: "user",
+      content: "今天把脚踝石膏拆了",
+      timestamp: clock.nowIso(),
+    });
+
+    const embeddedInputs: string[] = [];
+    const embeddingAdapter = new OpenAICompatAdapter({
+      apiKey: "test-embed-key",
+      baseURL: "https://api.openai.com/v1",
+      fetchFn: (async (url: string | URL | Request, init?: RequestInit) => {
+        expect(String(url)).toBe("https://api.openai.com/v1/embeddings");
+        const body = JSON.parse(String(init?.body)) as {
+          model: string;
+          input: string[];
+        };
+        expect(body.model).toBe("text-embedding-3-small");
+        embeddedInputs.push(...body.input);
+
+        const data = body.input.map((text, idx) => {
+          // 语义同义但字面零重合：书腰含“户外运动”与查询“去打羽毛球”指向同一向量轴 [1, 0, 0]
+          if (text.includes("户外运动") || text === "明天约朋友去打羽毛球") {
+            return { index: idx, embedding: [0.98, 0.05, 0.0] };
+          }
+          return { index: idx, embedding: [0.0, 0.99, 0.05] };
+        });
+        return new Response(JSON.stringify({ data }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    const mockChatProvider = makeMockProvider(
+      () =>
+        JSON.stringify({
+          event_summary: "聊明天打球",
+          confidence: 0.9,
+          is_warm: true,
+        }),
+      "刚拆石膏还是先别剧烈跑跳啦。",
+    );
+
+    const router = new OrganModelRouter({
+      defaultProvider: mockChatProvider,
+      embedding: {
+        provider: embeddingAdapter,
+        model: "text-embedding-3-small",
+      },
+    });
+
+    const engine = new EchoreEngine({
+      clock,
+      db,
+      memoryDir,
+      persona: { name: "阿澈", archetype: "cat_aloof", chronotype: "regular" },
+      router,
+    });
+
+    // 1. 睡眠环编译落地带 when_to_recall 的记忆，并自动调用 embedding provider 回填向量
+    await engine.runSleepCycle({
+      targetDateStr: "2026-11-13",
+      overrideReflectionText: "今天他说医院把脚踝石膏拆了。",
+      autoGitCommit: false,
+      compilationPlanOverride: {
+        memories: [
+          {
+            rel_path: "events/2026-11-13-cast-removed.md",
+            id: "evt-cast-removed",
+            type: "事件记录",
+            date: "2026-11-13",
+            status: "有效",
+            source_event_id: ev.id,
+            category: "preference",
+            allow_forget: true,
+            when_to_recall: "当聊到高强度户外运动或球类活动时",
+            assertions: ["状态([[people/user]]#身体恢复, 左脚踝刚拆掉固定石膏)"],
+            frontstage_narrative: "今天他说医院把脚踝石膏拆了。",
+          },
+        ],
+        rapport_rules: [],
+      },
+    });
+
+    const castMeta = db.getMemoryMeta("evt-cast-removed");
+    expect(castMeta?.embedding).toEqual([0.98, 0.05, 0.0]);
+    expect(
+      embeddedInputs.some(
+        (txt) =>
+          txt.startsWith("当聊到高强度户外运动或球类活动时\n") &&
+          txt.includes("左脚踝刚拆掉固定石膏"),
+      ),
+    ).toBe(true);
+
+    // 2. 再次调用 hydrateMissingMemoryEmbeddings：因未修改文件，跳过已存在向量的记忆（0 次重复请求）
+    const countBeforeSkip = embeddedInputs.length;
+    const secondHydrate = await hydrateMissingMemoryEmbeddings({
+      memoryDir,
+      db,
+      router,
+      now: clock.now(),
+    });
+    expect(secondHydrate.embeddedIds).toHaveLength(0);
+    expect(secondHydrate.skippedCount).toBeGreaterThanOrEqual(1);
+    expect(embeddedInputs.length).toBe(countBeforeSkip);
+
+    // 3. 环 1 实时对话查询“明天约朋友去打羽毛球”（与正文及书腰字面完全零重合，纯靠向量余弦召回）
+    const turnOut = await engine.onUserMessage("明天约朋友去打羽毛球");
+    const hitCast = turnOut.recalled.items.find(
+      (i) => i.id === "evt-cast-removed",
+    );
+    expect(hitCast).toBeDefined();
+    expect(hitCast?.scoreBreakdown.sem).toBeGreaterThan(0.95);
+    expect(hitCast?.scoreBreakdown.kw).toBe(0);
+
+    // 4. 观测台 HTTP /api/observatory/what-if 在进入 SAVEPOINT 前预计算 queryEmbedding 并零副作用召回
+    const app = createEchoreHttpApp({ engine });
+    const whatIfRes = await app.fetch(
+      new Request("http://localhost/api/observatory/what-if", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userMessage: "明天约朋友去打羽毛球",
+        }),
+      }),
+    );
+    expect(whatIfRes.status).toBe(200);
+    const whatIfJson = (await whatIfRes.json()) as {
+      recalled?: { items: Array<{ id: string; scoreBreakdown: { sem: number } }> };
+    };
+    const whatIfHit = whatIfJson.recalled?.items.find(
+      (i) => i.id === "evt-cast-removed",
+    );
+    expect(whatIfHit).toBeDefined();
+    expect(whatIfHit?.scoreBreakdown.sem).toBeGreaterThan(0.95);
+    expect(buildMemoryEmbeddingText).toBeFunction();
   });
 });
 

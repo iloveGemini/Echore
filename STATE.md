@@ -1,7 +1,7 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-13（完成 **Horon 记忆吸收二期 Wave 5–7 全部落地**及工作区 review 缺陷修复与 `evals/` 人工考卷补齐；验证 60/60 测试全绿）。
+> 最后更新：2026-11-13（完成 **Horon 记忆吸收二期 Wave 5–7 全部落地**、真实 `EmbeddingProvider` 向量路径端到端闭环、三时区单测清零与 `evals/` 人工考卷补齐；验证 61/61 测试三时区全绿）。
 
 ## 1. 当前阶段与核心决议（2026-11-13）
 
@@ -12,7 +12,7 @@
   - **LLM 提示词外置化 (`prompts/*.md` & `src/core/prompts.ts`)**：将全系统 4 器官 10 个提示词（含 `stance-cue-judge.md`）统一收敛至顶层 [`prompts/`](prompts/README.md)，带 `version` 与 `organ` frontmatter，读时现读不缓存、支持 `promptsDir` 沙箱覆写。
   - **记忆进化 Wave 1–4（2026-11-12，摘要）**：Z 式冲突待复核门、L7 颗粒度机检与睡眠环原子回滚；空档短路、会话去重与三层级联冷仓唤醒；IDF 实词打分、三通道 RRF 融合、二跳 Hub 抑制图扩散与 `recall-replay` 基准；30min 双向原话反馈链、`rapport.md` 条件收窄与双门控立场锚；跨午夜单调睡眠游标（`getUnsettledEventLogs`）与日记封底切分（`getCircadianDateStr`）。
   - **Horon 吸收二期 Wave 5–7（2026-11-13，摘要）**：
-    1. **Wave 5.1–5.2 书腰索引与共现转移边 (`schemas.ts` · `compiler.ts` · `recall.ts` · `decay.ts` · `db.ts`)**：支持 `when_to_recall` + 反泛化门 `sanitizeWhenToRecall`、词法/IDF 融合与 `embedding_fingerprint` 变更清空陈旧 `embedding_json`；`memory_transitions` 事务化记录 30min 滑窗内跨轮实质召回批次共现（`step=0.35`, `γ=0.95`, `<0.05` 剪枝，无 `1.0` 封顶）并入桶 C 一跳联想。
+    1. **Wave 5.1–5.2 书腰索引、向量路径与共现转移边 (`schemas.ts` · `compiler.ts` · `recall.ts` · `decay.ts` · `db.ts` · `src/llm/`)**：支持 `when_to_recall` + 反泛化门 `sanitizeWhenToRecall`、OpenAI 兼容 `EmbeddingProvider`（`POST /embeddings`）+ `hydrateMissingMemoryEmbeddings` 睡眠环增量回填 + 环 1 / What-If 查询前置嵌入、词法/IDF 融合与 `embedding_fingerprint` 变更清空陈旧 `embedding_json`；`memory_transitions` 事务化记录 30min 滑窗内跨轮实质召回批次共现（`step=0.35`, `γ=0.95`, `<0.05` 剪枝，无 `1.0` 封顶）并入桶 C 一跳联想。
     2. **Wave 6.1–6.3 门控精度与文本补丁 (`recall.ts` · `linter.ts` · `text-patch.ts` · `compiler.ts` · `evals/`)**：`isStanceCue` 非空档命中走 `endocrine` 路由二元复筛（`1200ms` 超时降级）；`memory_meta.audit_fingerprint` 仅在通过 L7 后落盘供增量跳过，L8 主题混装 `Warning`（全断言带锚 + `>=300B` + `>=3` 断言，绝不阻断睡眠环）；独立实现 `replaceUniqueNormalizedFragment`（不改全文 NFC）加固 `rapport.md` 条件收窄；补齐 `evals/{stance-cue-judge,memory-compiler}` 人工考卷。
     3. **Wave 7.1–7.2 推演探针与 CoW 快照 (`engine.ts` · `db.ts` · `http-server.ts`)**：`probeWhatIf()` 在 SQLite `SAVEPOINT` 内纯同步零副作用推演并暴露 `POST /api/observatory/what-if`；`memory_snapshots` 按需 Copy-on-Write 捕获当夜最早基线、自动清理 7 个睡眠日前快照并支持局部同步 `rollbackMemorySnapshot()` / `POST /api/observatory/rollback-snapshot`。
 - **M3.1 已落地交付项（五官感知层 + 独居生活引擎）**：
@@ -49,7 +49,7 @@
 
 ## 3. 验证结果与运行备忘（2026-11-13）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun test` → **11 个测试文件、60/60 项测试（598 个断言）全绿通过**（`tests/horon-waves-5-7.test.ts` 12/12 在 `UTC` / `Asia/Shanghai` / `America/New_York` 三时区全绿）
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → **11 个测试文件、61/61 项测试（616 个断言）在 `UTC` / `Asia/Shanghai` / `America/New_York` 三时区全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
-- **已知问题**：`bun run test:tz` 下既有 `tests/llm-and-loop.test.ts:399` 在 `TZ=Asia/Shanghai` 会因固定 UTC 测试夹具时间戳落入 `night_owl` 跨午夜起居日而失败（与本次改动无关）；真实 embedding provider 尚未接入，Wave 5.1 向量路径端到端联调待接入后补测。
+- **已知问题**：无（`tests/llm-and-loop.test.ts` 跨午夜时区夹具与 `EmbeddingProvider` Wave 5.1 向量路径端到端联调均已闭环清零）。

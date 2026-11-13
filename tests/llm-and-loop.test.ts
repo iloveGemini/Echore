@@ -267,7 +267,7 @@ describe("LLM Layer: Sandwich Prompt Caching & Dual Adapter Prefix Stability", (
 
 describe("Loop 1 End-to-End: EchoreEngine Reactive Loop + SilentWorker Subagent", () => {
   test("Full reactive loop runs recall, endocrine gates, silent worker delegation, reply and hot journal", async () => {
-    const clock = new VirtualClock("2026-11-10T20:15:00.000Z");
+    const clock = new VirtualClock("2026-11-10T20:15:00");
     const db = new EchoreDatabase({ dbPath: ":memory:", clock });
     const tmpMemDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "echore-engine-test-"),
@@ -394,7 +394,7 @@ describe("Loop 1 End-to-End: EchoreEngine Reactive Loop + SilentWorker Subagent"
     const journalFile = path.join(
       tmpMemDir,
       "journal",
-      `${clock.todayStr()}.md`,
+      `${engine.getCircadianDateStr()}.md`,
     );
     expect(fs.existsSync(journalFile)).toBe(true);
     expect(fs.readFileSync(journalFile, "utf8")).toContain("人体工学椅");

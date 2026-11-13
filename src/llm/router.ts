@@ -1,11 +1,19 @@
 import { AnthropicAdapter } from "./anthropic.ts";
-import { OpenAICompatAdapter } from "./openai-compat.ts";
-import type { LLMProvider, OrganRole } from "./types.ts";
+import {
+  DEFAULT_OPENAI_EMBEDDING_MODEL,
+  OpenAICompatAdapter,
+} from "./openai-compat.ts";
+import type { EmbeddingProvider, LLMProvider, OrganRole } from "./types.ts";
 
 export interface OrganModelRoute {
   provider: LLMProvider;
   model: string;
   maxTokens?: number;
+}
+
+export interface EmbeddingModelRoute {
+  provider: EmbeddingProvider;
+  model: string;
 }
 
 export type OrganRoutingTable = Record<OrganRole, OrganModelRoute>;
@@ -31,12 +39,46 @@ export const DEFAULT_OPENAI_ORGAN_MODELS: Record<OrganRole, string> = {
  * - 支持按岗位覆写模型名：`ECHORE_FRONTSTAGE_MODEL`、`ECHORE_ENDOCRINE_MODEL`、`ECHORE_COMPILER_MODEL`、`ECHORE_WORKER_MODEL`（或统一 `ECHORE_MODEL` / `OPENAI_MODEL`）；
  * - 若均未配置，回退至传入的 `fallbackProvider`。
  */
+export function resolveEmbeddingRouteFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): EmbeddingModelRoute | undefined {
+  const explicitKey =
+    env.ECHORE_EMBEDDING_API_KEY?.trim() || env.EMBEDDING_API_KEY?.trim();
+  const explicitBaseUrl =
+    env.ECHORE_EMBEDDING_BASE_URL?.trim() || env.EMBEDDING_BASE_URL?.trim();
+  const explicitModel =
+    env.ECHORE_EMBEDDING_MODEL?.trim() || env.EMBEDDING_MODEL?.trim();
+  const openaiKey = env.OPENAI_API_KEY?.trim();
+  const openaiBaseUrl =
+    env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1";
+
+  const apiKey = explicitKey || openaiKey;
+  if (!apiKey && !explicitBaseUrl) {
+    return undefined;
+  }
+
+  const isDefaultOpenAiEndpoint = openaiBaseUrl.includes("api.openai.com");
+  if (!explicitKey && !explicitBaseUrl && !explicitModel && !isDefaultOpenAiEndpoint) {
+    return undefined;
+  }
+
+  const baseURL = explicitBaseUrl || openaiBaseUrl;
+  const model = explicitModel || DEFAULT_OPENAI_EMBEDDING_MODEL;
+  const provider = new OpenAICompatAdapter({
+    apiKey: apiKey ?? "",
+    baseURL,
+  });
+
+  return { provider, model };
+}
+
 export function createOrganRouterFromEnv(
   fallbackProvider: LLMProvider,
   env: Record<string, string | undefined> = process.env,
 ): { router: OrganModelRouter; modeDescription: string } {
   const anthropicKey = env.ANTHROPIC_API_KEY?.trim();
   const openaiKey = env.OPENAI_API_KEY?.trim();
+  const embeddingRoute = resolveEmbeddingRouteFromEnv(env);
 
   if (anthropicKey) {
     const provider = new AnthropicAdapter({
@@ -67,8 +109,9 @@ export function createOrganRouterFromEnv(
         endocrine: { provider, model: endocrineModel },
         compiler: { provider, model: compilerModel },
         worker: { provider, model: workerModel },
+        embedding: embeddingRoute,
       }),
-      modeDescription: `Anthropic (${frontstageModel} / endocrine:${endocrineModel})`,
+      modeDescription: `Anthropic (${frontstageModel} / endocrine:${endocrineModel}${embeddingRoute ? ` / embed:${embeddingRoute.model}` : ""})`,
     };
   }
 
@@ -102,13 +145,17 @@ export function createOrganRouterFromEnv(
         endocrine: { provider, model: endocrineModel },
         compiler: { provider, model: compilerModel },
         worker: { provider, model: workerModel },
+        embedding: embeddingRoute,
       }),
-      modeDescription: `OpenAI-Compatible @ ${baseURL} (${frontstageModel} / endocrine:${endocrineModel})`,
+      modeDescription: `OpenAI-Compatible @ ${baseURL} (${frontstageModel} / endocrine:${endocrineModel}${embeddingRoute ? ` / embed:${embeddingRoute.model}` : ""})`,
     };
   }
 
   return {
-    router: new OrganModelRouter({ defaultProvider: fallbackProvider }),
+    router: new OrganModelRouter({
+      defaultProvider: fallbackProvider,
+      embedding: embeddingRoute,
+    }),
     modeDescription: "Local Fallback Mock (未检测到 ANTHROPIC_API_KEY 或 OPENAI_API_KEY)",
   };
 }
@@ -119,9 +166,13 @@ export function createOrganRouterFromEnv(
  */
 export class OrganModelRouter {
   private readonly routes: OrganRoutingTable;
+  private embeddingRoute?: EmbeddingModelRoute;
 
   constructor(
-    routes: Partial<OrganRoutingTable> & { defaultProvider?: LLMProvider },
+    routes: Partial<OrganRoutingTable> & {
+      defaultProvider?: LLMProvider;
+      embedding?: EmbeddingModelRoute;
+    },
   ) {
     const fallbackProvider = routes.defaultProvider;
     const resolveRoute = (role: OrganRole): OrganModelRoute => {
@@ -144,6 +195,7 @@ export class OrganModelRouter {
       compiler: resolveRoute("compiler"),
       worker: resolveRoute("worker"),
     };
+    this.embeddingRoute = routes.embedding;
   }
 
   getRoute(role: OrganRole): OrganModelRoute {
@@ -152,5 +204,23 @@ export class OrganModelRouter {
 
   setRoute(role: OrganRole, route: OrganModelRoute): void {
     this.routes[role] = route;
+  }
+
+  getEmbeddingRoute(): EmbeddingModelRoute | undefined {
+    return this.embeddingRoute;
+  }
+
+  setEmbeddingRoute(route: EmbeddingModelRoute | undefined): void {
+    this.embeddingRoute = route;
+  }
+
+  async embedTexts(texts: string[]): Promise<number[][] | null> {
+    if (!this.embeddingRoute || texts.length === 0) {
+      return null;
+    }
+    return this.embeddingRoute.provider.embed({
+      model: this.embeddingRoute.model,
+      texts,
+    });
   }
 }

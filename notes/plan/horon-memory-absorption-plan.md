@@ -20,7 +20,7 @@
 | **1. Wave 5.2 常数与信号源说明** | 误把改编后的 `0.25` 步长与 `1.0` 封顶当成 Horon 原样（Horon 实为显式 `read_concept`、步长 `0.8`、无封顶） | 明确区分 Horon（显式阅读、`step=0.8`、无封顶）与 Echore 改编（30min 被动召回批次噪声更高，取 `PASSIVE_TRANSITION_STEP = 0.35`）；**去掉写入时的人为 `1.0` 硬封顶**（靠 $\gamma^{r_k}$ 自然收敛，仅在桶 C 算分时归一） |
 | **2. Wave 7.1 `SAVEPOINT` 并发与边界** | ① `SAVEPOINT` 内若 `await` 异步 embedding 会吞掉并发请求的写入；② 列出的纯函数跑不出“入睡”场景；③ 漏了 `recentSessionRecalledIds` 内存态污染 | ① **硬性规定 `SAVEPOINT` 块内纯同步零 `await`**（embedding 必须在开启 `SAVEPOINT` 前算完）；② **移除“入睡”场景承诺，禁调生成式 LLM 与磁盘写入**；③ 探针禁改任何引擎内存态，验收断言内存态不变 |
 | **3. Wave 6.2 L8 阻塞睡眠环风险** | L8 用含糊的“词面重合为 0”启发式且作为 Error 会触发 `runSleepCycle()` 整夜回滚；缺最小字节门槛 | ① **`LintIssue` 引入 `severity: "error" \| "warning"`，L8 降级为 `warning`（不触发睡眠环回滚）**；② 补 `< 300B`（UTF-8）与 `< 3` 条断言免检下限；③ 废除“词面重合为 0”，改为非泛化实体与 `#slot` 连通分量分裂检测，并补同事件零词面重合不误报单测 |
-| **4. Wave 5.1 书腰向量路径与质量门** | 漏提 `meta.embedding` 路径；`1.20x` 加权位置不清；LLM 批量生成书腰无反泛化质量门 | ① 本期先行词法语义与 IDF 双路径，同时落地 `when_to_recall` 变更时清空旧 `embedding_json` 的失效契约（真实向量生成与端到端向量路径验收待后续 embedding provider 接入后补齐）；② 去掉含糊的 `1.20x`，改为显式线性组合；③ 新增**泛化套话黑名单与最小实词质量门** |
+| **4. Wave 5.1 书腰向量路径与质量门** | 漏提 `meta.embedding` 路径；`1.20x` 加权位置不清；LLM 批量生成书腰无反泛化质量门 | ① 双路径齐备：接入 `EmbeddingProvider` 与 `OpenAICompatAdapter.embed()`，记忆编码源文本统一为 `when_to_recall ? `${when_to_recall}\n${summary}` : summary`，`when_to_recall` 变更时自动清空旧 `embedding_json` 并在睡眠环增量重算；未配置向量模型时走词法语义与 IDF 双路径；② 去掉含糊的 `1.20x`，改为显式线性组合；③ 新增**泛化套话黑名单与最小实词质量门** |
 | **5. Wave 6.1 歧义预筛漏报与模型钉死** | 二段复筛前又套了一层“歧义词正则”，导致反讽/未进词表转述漏检；未指定复筛模型槽位 | ① **去掉歧义词正则预筛**（只要 `isStanceCue` 命中且启用了复筛器，每次均走二元复筛）；② 钉死走 `router.ts` 现有的 **`endocrine` 轻量快速模型槽位**（禁走 `frontstage`），`1200ms` 超时降级 |
 | **6. Wave 6.3 补丁语义与补丁外字节** | 混淆了 Horon 的 `try_normalized_patch` 与 `find_patch_spans`；未防范全文前置 NFC 改写补丁外字节 | ① 注明中文引号/破折号为 Echore 独立规则；② 统一收敛为单函数 `replaceUniqueNormalizedFragment`（严格要求**唯一命中**）；③ **禁止对全文做前置 NFC 重写**，验收断言替换区间外字节 100% 不变 |
 | **7. Wave 7.2 快照留存与捕获方式** | 无跨夜留存清理策略（每夜无限累积）；未写明事前全量还是 Copy-on-Write | ① 明确采用 **Copy-on-Write 按需捕获**（仅在编译器/衰减器实际写文件前记 `UNIQUE(memory_id, sleep_date)` 基线）；② 新增 **7 个睡眠日留存策略**，睡眠环尾部自动清理过期快照 |
@@ -43,8 +43,12 @@
     1. 剥离套话前缀/泛化词（`/当?(?:日常|平时|随便|普通|一般)?(?:聊天|闲聊|对话|说话|聊到生活|提到用户|任何时候|每次对话)时?/gu`）及标点空白；
     2. 若剩余有效实词字符数 `< 4`，或整句长度 `< 6` / `> 120`，判定为无效泛化书腰，**直接丢弃置为 `undefined`**（不生成保底废话，宁缺毋滥）；
     3. `writeUpdatedFrontmatter`（`decay.ts:78`）写回 YAML 时保真保留合法的 `when_to_recall`。
-- **词法打分与向量契约预留 (`src/hippocampus/recall.ts` & `src/hippocampus/decay.ts`)**：
-  1. **向量路径预留口径（待 embedding provider 接入后联调）**：全仓当前尚无真实 embedding 生产端；此处先约定后续接入 embedding 时的编码源文本为 `when_to_recall ? `${when_to_recall}\n${summary}` : summary`，并在 `syncMemoryMetaFromFiles`（`decay.ts`）中以独立的 `embedding_fingerprint`（基于 `when_to_recall` 与正文哈希）判断变更并主动清空旧 `embedding_json`（包括新增/修改/移除 `when_to_recall` 或正文改写，而纯 `status` 变更不误清空；真实向量生成与端到端向量验收暂标为“待 embedding 接入后测”）。
+- **向量路径与词法打分契约 (`src/llm/` · `src/hippocampus/recall.ts` · `src/hippocampus/decay.ts` · `src/loop/engine.ts`)**：
+  1. **向量路径（`EmbeddingProvider` + 增量回填 + 实时查询嵌入）**：
+     - `src/llm/types.ts` 定义 `EmbeddingProvider`（`embed(texts, options): Promise<number[][]>`），`OpenAICompatAdapter` 实现 `POST ${baseURL}/embeddings`，`OrganModelRouter` 提供可选 `embedding` 槽位（支持 `ECHORE_EMBEDDING_MODEL` / `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` 或复用 `OPENAI_API_KEY`）；
+     - 记忆编码源文本由 `buildMemoryEmbeddingText(file)` 统一生成为 `when_to_recall ? `${when_to_recall}\n${summary}` : summary`；`syncMemoryMetaFromFiles`（`decay.ts`）以独立的 `embedding_fingerprint`（基于 `when_to_recall` 与正文哈希）判断变更并主动清空旧 `embedding_json`（纯 `status` 变更不误清空）；
+     - `hydrateMissingMemoryEmbeddings` 扫描活跃且 `embedding === undefined` 的记忆批量生成向量并写回 `memory_meta.embedding_json`（在 `runSleepCycle()` 通过 Linter 后自动增量执行，异常降级不阻断睡眠环）；
+     - `EchoreEngine.onUserMessage`（非空档时与 `verifyStanceCueWithOrgan` 并行，带超时降级）与 `POST /api/observatory/what-if`（在进入 `SAVEPOINT` 前同步点外完成）自动计算 `queryEmbedding` 传入 `recallMemories`。
   2. **词法语义路径（当前默认生效路径）**：
      - 设查询与 `file.body` 的词袋余弦为 $S_{\text{body}} = \text{computeLexicalSemanticSimilarity}(\text{query}, \text{body})$；
      - 若存在 `when_to_recall`，计算书腰余弦 $S_{\text{cue}} = \text{computeLexicalSemanticSimilarity}(\text{query}, \text{when\_to\_recall})$，最终词法语义分定义为：
@@ -170,7 +174,7 @@
 ## 2. 验收标准（含审阅补充断言）
 
 1. **Wave 5 验收**：
-   - **5.1 书腰**：测试记忆正文写“脚踝拆绷带”、`when_to_recall` 写“当聊到周末爬山或剧烈运动时”，查询“周末去爬山吗”在词法与 IDF 路径下均能召回该记忆（向量路径待后续 embedding provider 接入后补充端到端联调测试）；测试纯泛化书腰（“日常闲聊时”）被 `sanitizeWhenToRecall` 过滤丢弃；测试 `when_to_recall` 绝不出现在前台 `formattedBlock` 中；测试 `audit_fingerprint` 变更时清理旧 `embedding_json`。
+   - **5.1 书腰**：测试记忆正文写“脚踝拆绷带”、`when_to_recall` 写“当聊到周末爬山或剧烈运动时”，查询“周末去爬山吗”在向量路径（`EmbeddingProvider` 编码 `${when_to_recall}\n${summary}`）、词法路径与 IDF 路径下均能召回该记忆；测试纯泛化书腰（“日常闲聊时”）被 `sanitizeWhenToRecall` 过滤丢弃；测试 `when_to_recall` 绝不出现在前台 `formattedBlock` 中；测试 `embedding_fingerprint` 变更时清理旧 `embedding_json` 并由 `hydrateMissingMemoryEmbeddings` 仅重算脏条目。
    - **5.2 共现边**：测试两条无共同 `[[symbol]]` 的记忆在 30min 内跨轮先后被实质召回后，按 `PASSIVE_TRANSITION_STEP = 0.35` 建立无硬封顶转移边并在后续单独命中源记忆时由桶 C 召回目标记忆；测试空档输入与同轮共现不建边。
 2. **Wave 6 验收**：
    - **6.1 两段门控**：测试每次 `isStanceCue` 命中均触发 `stanceBinaryVerifier`（无歧义词预筛漏网），转述句 `"有人说那部电影很难看，是不是很离谱"` 被复筛拦截不触发立场锚，且超时/报错时自动降级回退至正则结果。

@@ -86,6 +86,16 @@ export interface LLMProvider {
   generateSandwich(request: SandwichRequest): Promise<LLMResponse>;
 }
 
+export interface EmbeddingGenerateParams {
+  model?: string;
+  texts: string[];
+}
+
+export interface EmbeddingProvider {
+  readonly providerName: string;
+  embed(params: EmbeddingGenerateParams): Promise<number[][]>;
+}
+
 /**
  * 轻量级 Zod Object Schema -> JSON Schema 转换器（带 additionalProperties: false）
  */

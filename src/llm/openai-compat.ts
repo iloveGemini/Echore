@@ -1,6 +1,8 @@
 import { assertNoInternalLeaks } from "../core/schemas.ts";
 import {
   type ChatMessage,
+  type EmbeddingGenerateParams,
+  type EmbeddingProvider,
   type LLMGenerateParams,
   type LLMProvider,
   type LLMResponse,
@@ -9,6 +11,8 @@ import {
   type ZodTool,
   zodObjectToJsonSchema,
 } from "./types.ts";
+
+export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 
 export interface OpenAICompatAdapterOptions {
   apiKey?: string;
@@ -85,7 +89,7 @@ function toOpenAIMessages(
   return out;
 }
 
-export class OpenAICompatAdapter implements LLMProvider {
+export class OpenAICompatAdapter implements LLMProvider, EmbeddingProvider {
   readonly providerName = "openai-compat";
   private readonly apiKey: string;
   private readonly baseURL: string;
@@ -144,6 +148,49 @@ export class OpenAICompatAdapter implements LLMProvider {
       messages,
       ...(tools ? { tools } : {}),
     });
+  }
+
+  /**
+   * Wave 5.1 标准 OpenAI 兼容 `/embeddings` 批量向量化接口
+   * 兼容 OpenAI / SiliconFlow / Ollama / Voyage / Jina 等 `/v1/embeddings` 端点
+   */
+  async embed(params: EmbeddingGenerateParams): Promise<number[][]> {
+    if (params.texts.length === 0) {
+      return [];
+    }
+
+    const response = await this.fetchFn(`${this.baseURL}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: params.model ?? DEFAULT_OPENAI_EMBEDDING_MODEL,
+        input: params.texts,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `OpenAICompatAdapter Embeddings HTTP ${response.status}: ${errText}`,
+      );
+    }
+
+    const json = (await response.json()) as {
+      data?: Array<{
+        index?: number;
+        embedding?: number[];
+      }>;
+    };
+
+    const items = [...(json.data ?? [])].sort(
+      (a, b) => (a.index ?? 0) - (b.index ?? 0),
+    );
+    return items.map((item) =>
+      Array.isArray(item.embedding) ? item.embedding : [],
+    );
   }
 
   private async sendChatCompletion(

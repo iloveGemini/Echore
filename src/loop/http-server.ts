@@ -525,7 +525,10 @@ export function createEchoreHttpApp(options: {
             400,
           );
         }
-        const probeResult = engine.probeWhatIf(parsed.data);
+        const preparedScenario = await engine.prepareWhatIfScenario(
+          parsed.data,
+        );
+        const probeResult = engine.probeWhatIf(preparedScenario);
         return jsonResponse(probeResult);
       }
 

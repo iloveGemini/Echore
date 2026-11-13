@@ -75,6 +75,7 @@ export const DIACHRONIC_EDGE_DAMPING = 0.40;
 export const RRF_DEFAULT_K = 60;
 export const STANCE_ANCHOR_BOOST = 0.22;
 export const STANCE_CUE_VERIFY_TIMEOUT_MS = 1200;
+export const QUERY_EMBEDDING_TIMEOUT_MS = 1200;
 export const TRANSITION_RECALL_MIN_WEIGHT = 0.20;
 export const TRANSITION_RECALL_COEFF = 0.70;
 
@@ -575,6 +576,52 @@ function extractBodySections(body: string): {
     summary: assertions.join("；") || lines.slice(0, 2).join(" "),
     frontstageNarrative: narratives.length > 0 ? narratives.join(" ") : undefined,
   };
+}
+
+/**
+ * Wave 5.1 记忆向量化编码源文本合成：
+ * `when_to_recall ? `${when_to_recall}\n${summary}` : summary`
+ */
+export function buildMemoryEmbeddingText(file: ParsedMemoryFile): string {
+  const { summary } = extractBodySections(file.body);
+  const cue = file.frontmatter.when_to_recall?.trim();
+  return cue ? `${cue}\n${summary}` : summary;
+}
+
+/**
+ * Wave 5.1 查询侧异步向量编码（带超时与降级保护，供同步 recallMemories / probeWhatIf 调用前计算）：
+ * - 空档输入或未配置 embedding 路由时直接返回 undefined（零开销回退词法+IDF）；
+ * - 超时（默认 1200ms）或异常时安全返回 undefined。
+ */
+export async function embedQueryWithOrgan(params: {
+  query: string;
+  router?: OrganModelRouter;
+  timeoutMs?: number;
+}): Promise<number[] | undefined> {
+  const { query, router, timeoutMs = QUERY_EMBEDDING_TIMEOUT_MS } = params;
+  const trimmed = query.trim();
+  if (!trimmed || isIdleQuery(trimmed) || !router?.getEmbeddingRoute()) {
+    return undefined;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const task = Promise.resolve()
+      .then(() => router.embedTexts([trimmed]))
+      .then((vecs) =>
+        vecs && Array.isArray(vecs[0]) && vecs[0].length > 0
+          ? vecs[0]
+          : undefined,
+      );
+    const timeoutPromise = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
+    });
+    return await Promise.race([task, timeoutPromise]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
