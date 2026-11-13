@@ -14,12 +14,18 @@ import {
   type EventProducer,
   type EventSource,
   type EventVersionStatus,
+  type GenesisStatus,
   type HormoneState,
   HormoneStateSchema,
   type MemoryCategory,
   type MemoryStatus,
+  type NamingMode,
+  type NamingState,
+  PersonaConfigSchema,
   type ReflexState,
   ReflexStateSchema,
+  type ResidentStateRecord,
+  ResidentStateRecordSchema,
   type SystemLogActor,
   type SystemLogKind,
   type SystemLogRecord,
@@ -347,6 +353,16 @@ export class EchoreDatabase {
       CREATE TABLE IF NOT EXISTS prompt_baselines (
         artifact TEXT PRIMARY KEY,
         hash TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS resident_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        genesis_status TEXT NOT NULL DEFAULT 'pending',
+        naming_mode TEXT NOT NULL DEFAULT 'co_create',
+        naming_state TEXT NOT NULL DEFAULT 'pending',
+        persona_config_json TEXT NOT NULL,
+        initialized_at TEXT,
         updated_at TEXT NOT NULL
       );
     `);
@@ -1698,6 +1714,60 @@ export class EchoreDatabase {
         validated.cap_ox,
         validated.updated_at,
       );
+  }
+
+  getResidentState(): ResidentStateRecord | null {
+    const row = this.sqlite
+      .query(
+        `SELECT genesis_status, naming_mode, naming_state, persona_config_json, initialized_at, updated_at
+         FROM resident_state WHERE id = 1`,
+      )
+      .get() as {
+      genesis_status: GenesisStatus;
+      naming_mode: NamingMode;
+      naming_state: NamingState;
+      persona_config_json: string;
+      initialized_at: string | null;
+      updated_at: string;
+    } | null;
+
+    if (!row) return null;
+    const parsedPersona = PersonaConfigSchema.parse(
+      JSON.parse(row.persona_config_json),
+    );
+    return ResidentStateRecordSchema.parse({
+      genesis_status: row.genesis_status,
+      naming_mode: row.naming_mode,
+      naming_state: row.naming_state,
+      persona_config: parsedPersona,
+      initialized_at: row.initialized_at,
+      updated_at: row.updated_at,
+    });
+  }
+
+  saveResidentState(state: ResidentStateRecord): ResidentStateRecord {
+    const validated = ResidentStateRecordSchema.parse(state);
+    this.sqlite
+      .query(
+        `INSERT INTO resident_state (id, genesis_status, naming_mode, naming_state, persona_config_json, initialized_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           genesis_status = excluded.genesis_status,
+           naming_mode = excluded.naming_mode,
+           naming_state = excluded.naming_state,
+           persona_config_json = excluded.persona_config_json,
+           initialized_at = excluded.initialized_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        validated.genesis_status,
+        validated.naming_mode,
+        validated.naming_state,
+        JSON.stringify(validated.persona_config),
+        validated.initialized_at,
+        validated.updated_at,
+      );
+    return validated;
   }
 
   getReflexState(): ReflexState {

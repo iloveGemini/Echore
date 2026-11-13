@@ -26,6 +26,9 @@ export interface ArchetypePreset {
 
 export interface ResolvedEndocrineProfile {
   name: string;
+  user_name?: string;
+  user_pronoun?: string;
+  relationship?: string;
   core_persona: string;
   dominant_archetype: ArchetypeId;
   chronotype: ChronotypeId;
@@ -262,6 +265,9 @@ export function resolvePersonaProfile(
 
   return {
     name: config.name,
+    user_name: config.user_name,
+    user_pronoun: config.user_pronoun,
+    relationship: config.relationship,
     core_persona: config.core_persona,
     dominant_archetype: dominantArchetype,
     chronotype: config.chronotype,

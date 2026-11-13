@@ -1,15 +1,15 @@
 # Echore 当前状态
 
 > 开发交接用，不替代 [`README.md`](README.md)（是什么、为什么）和 [`notes/`](notes/)（设计与契约）。只留接下来要用的信息；全文 ≲ 150 行，做完的压成一行或删掉。
-> 最后更新：2026-11-13（完成 **系统账本 `system_log` + `system_materials`、`event_log` v2（`producer/source` 解耦 + 删除/Reroll/编辑/多媒体附件）与凌晨 04:30 + 启动补备双保险整库备份**；验证 67/67 测试三时区全绿）。
+> 最后更新：2026-11-13（完成 **住户记忆仓标准五件套文件工具 `src/frontstage/memory-tools.ts` 写边界收窄、`frontstage-system.md` v4 与 Genesis 双向取名初始化/SQLite `resident_state` 持久化**；验证 73/73 测试、838 断言三时区全绿）。
 
 ## 1. 当前阶段与核心决议（2026-11-13）
 
-- **当前阶段**：**M1–M3、记忆进化 Wave 1–4、Horon 吸收 Wave 5–7 与系统日志/`event_log` v2 全部完成**；下一步进入 **F1 正式前端定稿与后端联调**。
-- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.4）· [`notes/background/SYSTEM-LOG-DESIGN-20261113.md`](notes/background/SYSTEM-LOG-DESIGN-20261113.md)（v0.3）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md) · [`notes/plan/horon-memory-absorption-plan.md`](notes/plan/horon-memory-absorption-plan.md)（v2.1）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
+- **当前阶段**：**M1–M3、记忆进化 Wave 1–7、系统日志/`event_log` v2、标准五件套记忆工具与 Genesis 双向取名初始化全部完成**；下一步进入 **F1 正式前端定稿与后端联调**。
+- **架构总纲与生效契约**：[`notes/design/architecture-and-memory-spec.md`](notes/design/architecture-and-memory-spec.md)（v1.4）· [`notes/plan/genesis-and-memory-tools-plan.md`](notes/plan/genesis-and-memory-tools-plan.md)（v0.3 已落地）· [`notes/background/SYSTEM-LOG-DESIGN-20261113.md`](notes/background/SYSTEM-LOG-DESIGN-20261113.md)（v0.3）· [`notes/plan/memory-absorption-plan.md`](notes/plan/memory-absorption-plan.md) · [`notes/plan/horon-memory-absorption-plan.md`](notes/plan/horon-memory-absorption-plan.md)（v2.1）· [`notes/plan/m1-contracts.md`](notes/plan/m1-contracts.md) · [`notes/plan/m2-contracts.md`](notes/plan/m2-contracts.md) · [`notes/plan/m3-contracts.md`](notes/plan/m3-contracts.md)。
 - **M1 / M2 / Wave 1–4 已落地交付项（摘要）**：
   - `src/core/`（含 `prompts.ts` 与 `prompts/*.md` 读时热加载）、`src/reflex/guard.ts`、`src/endocrine/`、`src/hippocampus/`、`src/llm/`、`src/frontstage/{performer,silent-worker,journal,solitary}.ts`、`src/loop/engine.ts`（环 1 实时交互环 + 环 2 自主心跳环 + 环 3 昼夜睡眠新陈代谢环）。
-  - **LLM 提示词外置化 (`prompts/*.md` & `src/core/prompts.ts`)**：将全系统 4 器官 10 个提示词（含 `stance-cue-judge.md`）统一收敛至顶层 [`prompts/`](prompts/README.md)，带 `version` 与 `organ` frontmatter，读时现读不缓存、支持 `promptsDir` 沙箱覆写。
+  - **LLM 提示词外置化 (`prompts/*.md` & `src/core/prompts.ts`)**：将全系统 4 器官 10 个提示词（含 `stance-cue-judge.md`）统一收敛至顶层 [`prompts/`](prompts/README.md)，带 `version` 与 `organ` frontmatter，读时现读不缓存、支持 `promptsDir` 沙箱覆写；`frontstage-system.md` 升级为 v4 第一人称自我认知 7 节结构（明确全仓可读与白天仅可写 `journal/` 及局部 `edit` `people/{self,user}.md`，`solitary/` 对聊天环只读），支持 `{resident_name}`（默认 `Echore`）、`{user_name}`（默认 `用户`）、`{user_pronoun}`（默认 `他`）、`{relationship}`（默认 `初识`）动态插值与 [`evals/frontstage-system`](evals/frontstage-system/run.ts) 考卷。
   - **记忆进化 Wave 1–4（2026-11-12，摘要）**：Z 式冲突待复核门、L7 颗粒度机检与睡眠环原子回滚；空档短路、会话去重与三层级联冷仓唤醒；IDF 实词打分、三通道 RRF 融合、二跳 Hub 抑制图扩散与 `recall-replay` 基准；30min 双向原话反馈链、`rapport.md` 条件收窄与双门控立场锚；跨午夜单调睡眠游标（`getUnsettledEventLogs`）与日记封底切分（`getCircadianDateStr`）。
   - **Horon 吸收二期 Wave 5–7（2026-11-13，摘要）**：
     1. **Wave 5.1–5.2 书腰索引、分模型向量缓存与共现转移边 (`schemas.ts` · `compiler.ts` · `recall.ts` · `decay.ts` · `db.ts` · `src/llm/`)**：支持 `when_to_recall` + 反泛化门 `sanitizeWhenToRecall`、OpenAI 兼容 `EmbeddingProvider`（`POST /embeddings`）+ `memory_embeddings` 分模型隔离缓存表（默认 LRU 保留最近 3 模型，缺向量或维度不匹配时安全回退词法计算，切回历史模型零开销复用）+ `hydrateMissingMemoryEmbeddings` 睡眠环增量回填 + 环 1 / What-If 查询前置嵌入、词法/IDF 融合与 `embedding_fingerprint` 变更清理失效缓存；`memory_transitions` 事务化记录 30min 滑窗内跨轮实质召回批次共现（`step=0.35`, `γ=0.95`, `<0.05` 剪枝，无 `1.0` 封顶）并入桶 C 一跳联想。
@@ -46,12 +46,14 @@
 11. **记忆进化 Wave 4：睡前 30min 双向原话反馈链 + `rapport.md` 反例条件收窄 + 双门控 B 立场锚（✅ 已完成，2026-11-12）**
 12. **Horon 吸收 Wave 5–7：书腰触发索引 + 共现转移边 + 两段式立场锚 + 指纹/L8 Warning + 归一化补丁 + `SAVEPOINT` 探针 + CoW 快照（✅ 已完成，2026-11-13）**
 13. **系统日志 (`system_log` + `system_materials`)、`event_log` v2 四类消息操作与 04:30/启动补备双保险备份（✅ 已完成，2026-11-13）**
+14. **住户记忆仓标准五件套文件工具（`src/frontstage/memory-tools.ts`：`glob / grep / read / write / edit` + 白天写边界收窄 + `linter.ts` 预检 + 身份改写联动 `system_log` / SSE）（✅ 已完成，2026-11-13）**
+15. **Genesis 双向取名初始化与 `resident_state` 持久化（`GET /api/genesis/status`、`POST /api/genesis/init`、`co_create` 动态待定名提示与跨重启恢复）（✅ 已完成，2026-11-13）**
 
 ---
 
 ## 3. 验证结果与运行备忘（2026-11-13）
 
-- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → **12 个测试文件、67/67 项测试（750 个断言）在 `UTC` / `Asia/Shanghai` / `America/New_York` 三时区全绿通过**
+- **测试结果**：`ECHORE_DATA_DIR=~/.echore/test bun run test:tz` → **13 个测试文件、73/73 项测试（838 个断言）在 `UTC` / `Asia/Shanghai` / `America/New_York` 三时区全绿通过**
 - **类型检查**：`bun run typecheck` (`tsc --noEmit`) → **0 error**
 - **服务层与仿真启动**：`ECHORE_DATA_DIR=~/.echore/test bun run serve`（默认监听 `127.0.0.1:3377`）· `ECHORE_DATA_DIR=~/.echore/test bun run simulate 4h`
 - **已知问题**：无（`tests/llm-and-loop.test.ts` 跨午夜时区夹具与 `EmbeddingProvider` Wave 5.1 向量路径端到端联调均已闭环清零）。

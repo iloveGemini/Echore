@@ -2,6 +2,7 @@ import matter from "gray-matter";
 import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
+  type NamingState,
   type SubconsciousHandover,
 } from "../core/schemas.ts";
 import type { ResolvedEndocrineProfile } from "../endocrine/archetypes.ts";
@@ -28,11 +29,34 @@ export function sanitizeRapportForFrontstage(rawRapportMarkdown: string): string
   return cleanedBody;
 }
 
+export function interpolateFrontstageVariables(
+  templateText: string,
+  profile: Pick<
+    ResolvedEndocrineProfile,
+    "name" | "user_name" | "user_pronoun" | "relationship"
+  >,
+): string {
+  const residentName = profile.name?.trim() || "Echore";
+  const userName = profile.user_name?.trim() || "用户";
+  const userPronoun = profile.user_pronoun?.trim() || "他";
+  const relationship = profile.relationship?.trim() || "初识";
+
+  return templateText
+    .replaceAll("{resident_name}", residentName)
+    .replaceAll("{user_name}", userName)
+    .replaceAll("{user_pronoun}", userPronoun)
+    .replaceAll("{relationship}", relationship);
+}
+
 export function buildStaticSystemPartA(
   profile: ResolvedEndocrineProfile,
   promptsDir = PROMPTS_DIR,
 ): string {
-  const systemRuleText = readPrompt("frontstage-system.md", promptsDir).text;
+  const rawSystemRuleText = readPrompt("frontstage-system.md", promptsDir).text;
+  const systemRuleText = interpolateFrontstageVariables(
+    rawSystemRuleText,
+    profile,
+  );
   const text = [
     `# 住户身份：${profile.name}`,
     profile.core_persona,
@@ -48,8 +72,12 @@ export function buildDynamicSubconsciousBlock(params: {
   recallResult: RecallResult;
   perceptionSlice?: string;
   secretPrepNote?: string;
+  userPronoun?: string;
+  namingState?: NamingState;
+  historyTurnCount?: number;
 }): string {
   const sections: string[] = [];
+  const pronoun = params.userPronoun?.trim() || "他";
 
   sections.push(`# 潜意识心境交接单\n${renderHandoverYaml(params.handover)}`);
 
@@ -58,11 +86,20 @@ export function buildDynamicSubconsciousBlock(params: {
   }
 
   if (params.secretPrepNote?.trim()) {
-    sections.push(`# 我之前顺手帮他准备好的备忘\n${params.secretPrepNote.trim()}`);
+    sections.push(`# 我之前顺手帮${pronoun}准备好的备忘\n${params.secretPrepNote.trim()}`);
   }
 
   if (params.perceptionSlice?.trim()) {
     sections.push(`# 当下环境与伴生感知\n${params.perceptionSlice.trim()}`);
+  }
+
+  if (
+    params.namingState === "pending" &&
+    (params.historyTurnCount ?? 0) <= 15
+  ) {
+    sections.push(
+      `# 待定名提示\n我现在暂时还用着代号「Echore」，还没有正式名字。如果聊到取名，可以按我自己的脾气提议一个或和${pronoun}一起定；一旦定下来，直接用 edit 修改 people/self.md 里的「#姓名」那一行即可，平时没聊到时不用生硬推销改名。`,
+    );
   }
 
   const combined = sections.join("\n\n");
@@ -84,16 +121,21 @@ export function assembleSandwichRequest(params: {
   recallResult: RecallResult;
   perceptionSlice?: string;
   secretPrepNote?: string;
+  namingState?: NamingState;
   latestUserMessage: string;
   promptsDir?: string;
 }): SandwichRequest {
   const systemPartA = buildStaticSystemPartA(params.profile, params.promptsDir);
   const systemPartB = sanitizeRapportForFrontstage(params.rawRapportMarkdown);
+  const userTurnsSoFar = Math.floor(params.appendOnlyHistory.length / 2);
   const subconsciousBlock = buildDynamicSubconsciousBlock({
     handover: params.handover,
     recallResult: params.recallResult,
     perceptionSlice: params.perceptionSlice,
     secretPrepNote: params.secretPrepNote,
+    userPronoun: params.profile.user_pronoun,
+    namingState: params.namingState,
+    historyTurnCount: userTurnsSoFar,
   });
 
   // Sort tools deterministically by name so tool order never invalidates prefix cache
@@ -127,6 +169,7 @@ export async function performFrontstageTurn(params: {
   recallResult: RecallResult;
   perceptionSlice?: string;
   secretPrepNote?: string;
+  namingState?: NamingState;
   latestUserMessage: string;
   maxToolSteps?: number;
   promptsDir?: string;
@@ -147,6 +190,7 @@ export async function performFrontstageTurn(params: {
     recallResult: params.recallResult,
     perceptionSlice: params.perceptionSlice,
     secretPrepNote: params.secretPrepNote,
+    namingState: params.namingState,
     latestUserMessage: params.latestUserMessage,
     promptsDir: params.promptsDir,
   });

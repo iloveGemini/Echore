@@ -7,6 +7,10 @@ import { EchoreDatabase } from "../core/db.ts";
 import {
   assertNoInternalLeaks,
   type ChronotypeId,
+  GenesisInitRequestSchema,
+  type GenesisStatus,
+  type NamingMode,
+  type NamingState,
   PersonaConfigSchema,
   SolitaryActionKindSchema,
   type SubconsciousHandover,
@@ -43,7 +47,13 @@ export interface CompanionMessageItem {
 }
 
 export interface CompanionStateResponse {
+  genesisStatus: GenesisStatus;
+  namingMode: NamingMode;
+  namingState: NamingState;
   personaName: string;
+  userName: string;
+  userPronoun: string;
+  relationship: string;
   chronotype: ChronotypeId;
   currentDate: string;
   currentTime: string;
@@ -206,7 +216,13 @@ export function createEchoreHttpApp(options: {
     }));
 
     const state: CompanionStateResponse = {
+      genesisStatus: engine.genesisStatus,
+      namingMode: engine.namingMode,
+      namingState: engine.namingState,
       personaName: engine.profile.name,
+      userName: engine.profile.user_name ?? "用户",
+      userPronoun: engine.profile.user_pronoun ?? "他",
+      relationship: engine.profile.relationship ?? "初识",
       chronotype: engine.profile.chronotype,
       currentDate: engine.clock.todayStr(),
       currentTime: formatLocalTimeHm(now),
@@ -365,6 +381,60 @@ export function createEchoreHttpApp(options: {
         return jsonResponse(buildCompanionState());
       }
 
+      // 2.5 门口 Genesis 状态与出生初始化: GET /api/genesis/status & POST /api/genesis/init
+      if (req.method === "GET" && pathname === "/api/genesis/status") {
+        const statusPayload = engine.getGenesisStatus();
+        assertCompanionSafePayload(statusPayload, "http.genesis.status");
+        return jsonResponse(statusPayload);
+      }
+
+      if (req.method === "POST" && pathname === "/api/genesis/init") {
+        const rawBody = await req.json();
+        const GenesisHttpBodySchema = GenesisInitRequestSchema.extend({
+          weather: WeatherSnapshotSchema.optional(),
+        });
+        const parsed = GenesisHttpBodySchema.safeParse(rawBody);
+        if (!parsed.success) {
+          return jsonResponse(
+            { error: `Invalid genesis init body: ${parsed.error.message}` },
+            400,
+          );
+        }
+        const { weather, ...genesisInput } = parsed.data;
+        const initRes = await engine.initializeGenesis(genesisInput, {
+          weather,
+        });
+        const responsePayload = {
+          genesisStatus: initRes.genesisStatus,
+          namingMode: initRes.namingMode,
+          namingState: initRes.namingState,
+          residentName: initRes.profile.name,
+          userName: initRes.profile.user_name ?? "用户",
+          userPronoun: initRes.profile.user_pronoun ?? "他",
+          relationship: initRes.profile.relationship ?? "初识",
+          openingMessage: initRes.openingMessage,
+          handover: initRes.handover,
+        };
+        assertCompanionSafePayload(responsePayload, "http.genesis.init");
+        broadcastEvent("persona_updated", {
+          name: initRes.profile.name,
+          user_name: initRes.profile.user_name,
+          user_pronoun: initRes.profile.user_pronoun,
+          relationship: initRes.profile.relationship,
+          dominant_archetype: initRes.profile.dominant_archetype,
+          chronotype: initRes.profile.chronotype,
+        });
+        broadcastEvent("proactive_message", {
+          speaker: initRes.profile.name,
+          content: initRes.openingMessage,
+          trigger: "genesis_opening",
+          handover: initRes.handover,
+          currentDate: engine.clock.todayStr(),
+          currentTime: formatLocalTimeHm(engine.clock.now()),
+        });
+        return jsonResponse(responsePayload);
+      }
+
       // 3. 实时对话 (环 1): POST /api/chat
       if (req.method === "POST" && pathname === "/api/chat") {
         const rawBody = await req.json();
@@ -376,6 +446,7 @@ export function createEchoreHttpApp(options: {
           );
         }
 
+        const prevIdentityKey = `${engine.profile.name}|${engine.profile.user_name ?? ""}|${engine.profile.user_pronoun ?? ""}|${engine.profile.relationship ?? ""}`;
         const turnOut = await engine.onUserMessage(parsed.data.message, {
           weather: parsed.data.weather,
           desktopSamples: parsed.data.desktopSamples as
@@ -384,6 +455,17 @@ export function createEchoreHttpApp(options: {
           isHolidayOrAnniversary: parsed.data.isHolidayOrAnniversary,
           userActiveLateNight: parsed.data.userActiveLateNight,
         });
+        const nextIdentityKey = `${engine.profile.name}|${engine.profile.user_name ?? ""}|${engine.profile.user_pronoun ?? ""}|${engine.profile.relationship ?? ""}`;
+        if (nextIdentityKey !== prevIdentityKey) {
+          broadcastEvent("persona_updated", {
+            name: engine.profile.name,
+            user_name: engine.profile.user_name,
+            user_pronoun: engine.profile.user_pronoun,
+            relationship: engine.profile.relationship,
+            dominant_archetype: engine.profile.dominant_archetype,
+            chronotype: engine.profile.chronotype,
+          });
+        }
 
         const now = engine.clock.now();
         const companionResp: CompanionChatResponse = {
@@ -817,12 +899,16 @@ if (import.meta.main) {
   });
   const { router, modeDescription } =
     createOrganRouterFromEnv(fallbackProvider);
+  const savedResident = db.getResidentState();
   const engine = new EchoreEngine({
     clock,
     db,
     memoryDir,
-    persona: {
-      name: "林栖",
+    persona: savedResident?.persona_config ?? {
+      name: "Echore",
+      user_name: "用户",
+      user_pronoun: "他",
+      relationship: "初识",
       archetype: "cat_aloof",
       chronotype: "regular",
     },

@@ -108,13 +108,10 @@ function walkMarkdownFiles(baseDir: string, subDir = ""): string[] {
   return results;
 }
 
-export function parseStructuredMemoryFile(
-  memoryDir: string,
+export function parseStructuredMemoryContent(
   relPath: string,
-): ParsedMemoryFile | null {
-  const absPath = path.join(memoryDir, relPath);
-  if (!fs.existsSync(absPath)) return null;
-  const rawContent = fs.readFileSync(absPath, "utf8");
+  rawContent: string,
+): ParsedMemoryFile {
   const gm = matter(rawContent);
   const frontmatter = MemoryFrontmatterSchema.parse(gm.data);
   const symbolKey = relPath.replace(/\.md$/, "");
@@ -127,14 +124,40 @@ export function parseStructuredMemoryFile(
   };
 }
 
+export function parseStructuredMemoryFile(
+  memoryDir: string,
+  relPath: string,
+): ParsedMemoryFile | null {
+  const absPath = path.join(memoryDir, relPath);
+  if (!fs.existsSync(absPath)) return null;
+  const rawContent = fs.readFileSync(absPath, "utf8");
+  return parseStructuredMemoryContent(relPath, rawContent);
+}
+
 export function loadStructuredMemoryFiles(
   memoryDir: string,
+  candidateOverrides?: Map<string, string>,
 ): ParsedMemoryFile[] {
-  const relPaths = walkMarkdownFiles(memoryDir);
+  const relPaths = new Set(walkMarkdownFiles(memoryDir));
+  if (candidateOverrides) {
+    for (const relPath of candidateOverrides.keys()) {
+      if (
+        relPath.endsWith(".md") &&
+        !relPath.startsWith("journal/") &&
+        !relPath.startsWith("solitary/")
+      ) {
+        relPaths.add(relPath);
+      }
+    }
+  }
   const parsed: ParsedMemoryFile[] = [];
 
-  for (const relPath of relPaths) {
-    const file = parseStructuredMemoryFile(memoryDir, relPath);
+  for (const relPath of Array.from(relPaths).sort()) {
+    const overrideRaw = candidateOverrides?.get(relPath);
+    const file =
+      overrideRaw !== undefined
+        ? parseStructuredMemoryContent(relPath, overrideRaw)
+        : parseStructuredMemoryFile(memoryDir, relPath);
     if (file) {
       parsed.push(file);
     }
@@ -154,10 +177,19 @@ export function runMemoryLinter(params: {
   db: EchoreDatabase;
   now: Date;
   incrementalOnly?: boolean;
+  dryRun?: boolean;
+  candidateOverrides?: Map<string, string>;
 }): LintReport {
-  const { memoryDir, db, now, incrementalOnly = false } = params;
+  const {
+    memoryDir,
+    db,
+    now,
+    incrementalOnly = false,
+    dryRun = false,
+    candidateOverrides,
+  } = params;
   const issues: LintIssue[] = [];
-  const files = loadStructuredMemoryFiles(memoryDir);
+  const files = loadStructuredMemoryFiles(memoryDir, candidateOverrides);
   let skippedUnchangedFiles = 0;
 
   const bySymbol = new Map<string, ParsedMemoryFile>();
@@ -264,10 +296,13 @@ export function runMemoryLinter(params: {
       const predicateName = predMatch[1]!;
       const argsRaw = predMatch[2]!;
 
+      const minSemanticChars = relPath.startsWith("people/")
+        ? 1
+        : MIN_ASSERTION_SEMANTIC_CHARS;
       if (
         !skipPerFileContentChecks &&
         isGranularityCheckedFile &&
-        countSemanticChars(argsRaw) < MIN_ASSERTION_SEMANTIC_CHARS
+        countSemanticChars(argsRaw) < minSemanticChars
       ) {
         perFileContentHasError = true;
         issues.push({
@@ -375,7 +410,7 @@ export function runMemoryLinter(params: {
       }
     }
 
-    if (!skipPerFileContentChecks) {
+    if (!dryRun && !skipPerFileContentChecks) {
       db.setMemoryAuditFingerprint(
         frontmatter.id,
         perFileContentHasError ? null : currentFingerprint,

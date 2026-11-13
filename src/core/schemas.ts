@@ -41,6 +41,9 @@ export const ArchetypeBlendSchema = z.record(
 
 export const PersonaConfigSchema = z.object({
   name: z.string().default("Echore"),
+  user_name: z.string().default("用户"),
+  user_pronoun: z.string().default("他"),
+  relationship: z.string().default("初识"),
   core_persona: z
     .string()
     .default(
@@ -52,6 +55,39 @@ export const PersonaConfigSchema = z.object({
   mood_action_slots: MoodActionSlotsSchema.partial().optional(),
 });
 export type PersonaConfig = z.input<typeof PersonaConfigSchema>;
+
+export const GenesisStatusSchema = z.enum(["pending", "completed"]);
+export type GenesisStatus = z.infer<typeof GenesisStatusSchema>;
+
+export const NamingModeSchema = z.enum(["co_create", "user_fixed"]);
+export type NamingMode = z.infer<typeof NamingModeSchema>;
+
+export const NamingStateSchema = z.enum(["pending", "settled"]);
+export type NamingState = z.infer<typeof NamingStateSchema>;
+
+export const ResidentStateRecordSchema = z.object({
+  genesis_status: GenesisStatusSchema,
+  naming_mode: NamingModeSchema,
+  naming_state: NamingStateSchema,
+  persona_config: PersonaConfigSchema,
+  initialized_at: z.string().nullable(),
+  updated_at: z.string(),
+});
+export type ResidentStateRecord = z.infer<typeof ResidentStateRecordSchema>;
+
+export const GenesisInitRequestSchema = z.object({
+  user_name: z.string().trim().min(1).max(32).default("用户"),
+  user_pronoun: z.string().trim().min(1).max(16).default("他"),
+  relationship: z.string().trim().min(1).max(32).default("初识"),
+  archetype: z.union([ArchetypeIdSchema, ArchetypeBlendSchema]),
+  chronotype: ChronotypeIdSchema.default("regular"),
+  sliders: PersonaSlidersSchema.optional(),
+  mood_action_slots: MoodActionSlotsSchema.partial().optional(),
+  core_persona: z.string().trim().optional(),
+  naming_mode: NamingModeSchema.default("co_create"),
+  resident_name: z.string().trim().max(32).optional(),
+});
+export type GenesisInitRequest = z.input<typeof GenesisInitRequestSchema>;
 
 export const HormoneStateSchema = z.object({
   cortisol: z.number().min(0).max(1),

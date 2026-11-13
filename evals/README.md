@@ -8,6 +8,7 @@
 ## 手动运行命令
 
 ```bash
+bun run evals/frontstage-system/run.ts
 bun run evals/stance-cue-judge/run.ts
 bun run evals/memory-compiler/run.ts
 ```

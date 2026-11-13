@@ -50,7 +50,7 @@ export interface Clock {
 - `ChronotypeIdSchema`: `'early_bird' | 'regular' | 'night_owl'`
 - `SliderLevelSchema`: `'low' | 'mid' | 'high'`
 - `MoodActionSlotsSchema`: `{ when_hurt_or_tense, when_missing_user, when_bored_alone, when_warm_excited }`
-- `PersonaConfigSchema`: 支持 L0 单字符串或权重 Record、L1 可选滑块（`attachment_need`、`defensiveness`、`solitude_tolerance`）、L2 可选动作槽位覆写。
+- `PersonaConfigSchema`: 支持 `name`（默认 `'Echore'`）、`user_name`（默认 `'用户'`）、`user_pronoun`（默认 `'他'`）、`relationship`（默认 `'初识'`）、L0 单字符串或权重 Record、L1 可选滑块（`attachment_need`、`defensiveness`、`solitude_tolerance`）、L2 可选动作槽位覆写。
 - `SubconsciousHandoverSchema`:
   ```ts
   {

@@ -102,7 +102,7 @@ const DIACHRONIC_EXEMPT_PREDICATES = new Set([
   "情境表态",
 ]);
 
-function isProtectedNailFile(file: ParsedMemoryFile): boolean {
+export function isProtectedNailFile(file: ParsedMemoryFile): boolean {
   if (
     file.relPath.startsWith("people/") ||
     file.frontmatter.type === "符号定义" ||

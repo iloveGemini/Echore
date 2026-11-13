@@ -222,6 +222,28 @@ describe("Core: Prompts Loader (prompts/*.md)", () => {
       expect(systemA).toContain("## 自定义准绳");
       expect(systemA).toContain("保持测试热更新生效");
 
+      // Verify live default frontstage-system.md interpolates all 4 template variables cleanly
+      const liveDefaultSystemA = buildStaticSystemPartA(profile);
+      expect(liveDefaultSystemA).toContain("我是阿澈。");
+      expect(liveDefaultSystemA).toContain("我和用户的关系");
+      expect(liveDefaultSystemA).toContain("他是我的初识。");
+      expect(liveDefaultSystemA).not.toMatch(
+        /\{(?:resident_name|user_name|user_pronoun|relationship)\}/,
+      );
+
+      const customProfile = resolvePersonaProfile({
+        name: "Echore",
+        user_name: "阿林",
+        user_pronoun: "她",
+        relationship: "室友",
+        archetype: "dog_sunny",
+      });
+      const liveCustomSystemA = buildStaticSystemPartA(customProfile);
+      expect(liveCustomSystemA).toContain("我是Echore。");
+      expect(liveCustomSystemA).toContain("我和阿林的关系不是“她表演、我捧哏”");
+      expect(liveCustomSystemA).toContain("她是我的室友。");
+      expect(liveCustomSystemA).toContain("《我之前顺手帮她准备好的备忘》");
+
       const missing = readPrompt("non-existent.md", tmpDir);
       expect(missing).toEqual({ name: "non-existent.md", text: "", version: 0 });
       expect(parsePrompt("plain text without frontmatter", "raw.md")).toEqual({

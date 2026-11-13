@@ -18,11 +18,17 @@ import {
   type EventLogRecord,
   type EventProducer,
   type EventSource,
+  type GenesisInitRequest,
+  GenesisInitRequestSchema,
+  type GenesisStatus,
   type HormoneState,
+  type NamingMode,
+  type NamingState,
   type PersonaConfig,
   type PulseEvaluation,
   PulseEvaluationSchema,
   type ReflexState,
+  type ResidentStateRecord,
   type SolitaryActionKind,
   type SubconsciousHandover,
   type SystemLogActor,
@@ -57,6 +63,12 @@ import {
   synthesizeBedtimeReflection,
 } from "../frontstage/journal.ts";
 import {
+  createFrontstageMemoryTools,
+  extractIdentityChanges,
+  type IdentityFileChange,
+} from "../frontstage/memory-tools.ts";
+import {
+  buildStaticSystemPartA,
   performFrontstageTurn,
   sanitizeRapportForFrontstage,
 } from "../frontstage/performer.ts";
@@ -83,6 +95,7 @@ import {
 } from "../hippocampus/decay.ts";
 import {
   type LintReport,
+  parseStructuredMemoryFile,
   runMemoryLinter,
 } from "../hippocampus/linter.ts";
 import {
@@ -157,6 +170,30 @@ export interface EchoreEngineOptions {
   commitHash?: string;
   /** 是否在内存测试库中也强制开启凌晨 04:00-05:00 定时备份（默认文件库自动开启） */
   enableScheduledBackup?: boolean;
+  /** 若为 true，即使数据库已有 resident_state 也强制使用传入的 options.persona 覆盖 */
+  forceOverridePersona?: boolean;
+}
+
+export interface GenesisStatusSummary {
+  genesisStatus: GenesisStatus;
+  namingMode: NamingMode;
+  namingState: NamingState;
+  residentName: string;
+  userName: string;
+  userPronoun: string;
+  relationship: string;
+  initializedAt: string | null;
+}
+
+export interface GenesisInitResult {
+  genesisStatus: GenesisStatus;
+  namingMode: NamingMode;
+  namingState: NamingState;
+  profile: ResolvedEndocrineProfile;
+  openingMessage: string;
+  openingEventId: string;
+  handover: SubconsciousHandover;
+  lintReport: LintReport;
 }
 
 export interface ReactiveAttachmentInput {
@@ -396,9 +433,15 @@ export class EchoreEngine {
   readonly memoryDir: string;
   readonly promptsDir: string;
   profile: ResolvedEndocrineProfile;
+  private personaConfig: PersonaConfig;
+  genesisStatus: GenesisStatus;
+  namingMode: NamingMode;
+  namingState: NamingState;
+  private initializedAt: string | null = null;
   readonly router: OrganModelRouter;
   private readonly frontstageTools: ZodTool[];
   private readonly appendOnlyHistory: ChatMessage[] = [];
+  private readonly turnJournalWrittenPaths = new Set<string>();
   private recentSessionRecalledIds: string[] = [];
   private recentSubstantiveRecallBatches: RecallBatchSnapshot[] = [];
   private lastUserTurnAtMs: number | null = null;
@@ -411,7 +454,30 @@ export class EchoreEngine {
     this.db = options.db;
     this.memoryDir = options.memoryDir;
     this.promptsDir = options.promptsDir ?? PROMPTS_DIR;
-    this.profile = resolvePersonaProfile(options.persona);
+
+    const savedResident = this.db.getResidentState();
+    if (savedResident && !options.forceOverridePersona) {
+      this.personaConfig = { ...savedResident.persona_config };
+      this.profile = resolvePersonaProfile(this.personaConfig);
+      this.genesisStatus = savedResident.genesis_status;
+      this.namingMode = savedResident.naming_mode;
+      this.namingState = savedResident.naming_state;
+      this.initializedAt = savedResident.initialized_at;
+    } else {
+      this.personaConfig = { ...options.persona };
+      this.profile = resolvePersonaProfile(options.persona);
+      const hasFixedName = Boolean(
+        this.profile.name &&
+          this.profile.name.trim() &&
+          this.profile.name.trim() !== "Echore",
+      );
+      this.genesisStatus = savedResident?.genesis_status ?? "pending";
+      this.namingMode = hasFixedName ? "user_fixed" : "co_create";
+      this.namingState = hasFixedName ? "settled" : "pending";
+      this.initializedAt = savedResident?.initialized_at ?? null;
+      this.persistResidentState();
+    }
+
     this.router = options.router;
     this.stanceBinaryVerifier = options.stanceBinaryVerifier;
     this.stanceVerifyTimeoutMs = options.stanceVerifyTimeoutMs;
@@ -423,7 +489,20 @@ export class EchoreEngine {
       options.workerTools ?? [],
       this.promptsDir,
     );
+    const memoryTools = createFrontstageMemoryTools({
+      memoryDir: this.memoryDir,
+      db: this.db,
+      now: () => this.clock.now(),
+      getProfile: () => this.profile,
+      onIdentityChange: (change) => {
+        this.applyIdentityFileChange(change);
+      },
+      onJournalWritten: (relPath) => {
+        this.turnJournalWrittenPaths.add(relPath);
+      },
+    });
     this.frontstageTools = [
+      ...memoryTools,
       silentWorkerTool,
       ...(options.frontstageTools ?? []),
     ];
@@ -514,6 +593,370 @@ export class EchoreEngine {
     return this.db.formatSystemLogForResident(limit);
   }
 
+  private persistResidentState(): ResidentStateRecord {
+    return this.db.saveResidentState({
+      genesis_status: this.genesisStatus,
+      naming_mode: this.namingMode,
+      naming_state: this.namingState,
+      persona_config: {
+        ...this.personaConfig,
+        name: this.profile.name,
+        user_name: this.profile.user_name ?? "用户",
+        user_pronoun: this.profile.user_pronoun ?? "他",
+        relationship: this.profile.relationship ?? "初识",
+        core_persona: this.profile.core_persona,
+        chronotype: this.profile.chronotype,
+      },
+      initialized_at: this.initializedAt,
+      updated_at: this.clock.nowIso(),
+    });
+  }
+
+  getGenesisStatus(): GenesisStatusSummary {
+    return {
+      genesisStatus: this.genesisStatus,
+      namingMode: this.namingMode,
+      namingState: this.namingState,
+      residentName: this.profile.name,
+      userName: this.profile.user_name ?? "用户",
+      userPronoun: this.profile.user_pronoun ?? "他",
+      relationship: this.profile.relationship ?? "初识",
+      initializedAt: this.initializedAt,
+    };
+  }
+
+  /**
+   * 门口（Threshold）四步 Genesis 出生落盘流程（含双向取名与首句自然破冰）
+   */
+  async initializeGenesis(
+    rawInput: GenesisInitRequest,
+    options?: {
+      allowReinit?: boolean;
+      weather?: WeatherSnapshot;
+      overrideOpeningReply?: string;
+    },
+  ): Promise<GenesisInitResult> {
+    if (this.genesisStatus === "completed" && !options?.allowReinit) {
+      throw new Error("Genesis 初始化已完成，禁止重复覆盖出生档案。");
+    }
+    if (
+      this.genesisStatus === "completed" &&
+      options?.allowReinit &&
+      this.db.dbPath !== ":memory:"
+    ) {
+      this.runSystemBackup({ trigger: "manual" });
+    }
+
+    const input = GenesisInitRequestSchema.parse(rawInput);
+    let resolvedName = "Echore";
+    let nextNamingState: NamingState = "pending";
+
+    if (input.naming_mode === "user_fixed") {
+      const fixedName = input.resident_name?.trim();
+      if (!fixedName) {
+        throw new Error("user_fixed 取名模式下必须填写非空的 resident_name。");
+      }
+      resolvedName = fixedName;
+      nextNamingState = "settled";
+    } else {
+      resolvedName = "Echore";
+      nextNamingState = "pending";
+    }
+
+    const now = this.clock.now();
+    const nowIso = this.clock.nowIso();
+    const todayStr = this.clock.todayStr();
+
+    const nextPersonaConfig: PersonaConfig = {
+      name: resolvedName,
+      user_name: input.user_name,
+      user_pronoun: input.user_pronoun,
+      relationship: input.relationship,
+      ...(input.core_persona ? { core_persona: input.core_persona } : {}),
+      archetype: input.archetype,
+      chronotype: input.chronotype,
+      ...(input.sliders ? { sliders: input.sliders } : {}),
+      ...(input.mood_action_slots
+        ? { mood_action_slots: input.mood_action_slots }
+        : {}),
+    };
+
+    const prevSerialized = JSON.stringify(this.profile);
+    const nextProfile = resolvePersonaProfile(nextPersonaConfig);
+    const initHormones = createInitialHormoneState(nextProfile, now);
+    const handover = buildSubconsciousHandover({
+      hormoneState: initHormones,
+      profile: nextProfile,
+      activeConcerns: [],
+      db: this.db,
+      now,
+    });
+
+    const diskSnapshot = snapshotMemoryDirFiles(this.memoryDir);
+    let lintReport!: LintReport;
+    let openingMessage = options?.overrideOpeningReply?.trim() ?? "";
+
+    try {
+      // 先在快照保护下渲染并预检初始记忆仓（不提前污染 SQLite 或 this.genesisStatus）
+      this.renderGenesisMemoryFiles(todayStr, {
+        profile: nextProfile,
+        namingState: nextNamingState,
+      });
+
+      lintReport = runMemoryLinter({
+        memoryDir: this.memoryDir,
+        db: this.db,
+        now,
+        dryRun: true,
+      });
+      if (!lintReport.passed) {
+        const errText = lintReport.issues
+          .filter((i) => i.severity === "error")
+          .map((i) => i.message)
+          .join("; ");
+        throw new Error(`Genesis 初始记忆仓未通过 L1~L7 校验: ${errText}`);
+      }
+
+      // 生成第一句破冰开场白（若外部 LLM 失败，不落盘完成态，允许用户重试）
+      if (!openingMessage) {
+        const route = this.router.getRoute("frontstage");
+        const systemA = buildStaticSystemPartA(nextProfile, this.promptsDir);
+        const wakeRule = readPrompt("proactive-wake.md", this.promptsDir).text;
+        const namingCue =
+          nextNamingState === "pending"
+            ? `你刚刚搬进这里和${nextProfile.user_name}（${nextProfile.relationship}）打照面，现在暂时还用着代号「Echore」，还没有正式名字。`
+            : `你刚刚搬进这里和${nextProfile.user_name}（${nextProfile.relationship}）打照面，你的名字叫「${nextProfile.name}」。`;
+
+        const resp = await route.provider.generate({
+          model: route.model,
+          maxTokens: 240,
+          system: [systemA, wakeRule].filter(Boolean).join("\n\n"),
+          messages: [
+            {
+              role: "user",
+              content: [
+                `[当下心境交接单]\n${renderHandoverYaml(handover)}`,
+                `[初见情境]\n${namingCue}请用第一人称主动跟对方打第一声招呼（自然像真人开口，不要客服欢迎词）。`,
+              ].join("\n\n"),
+            },
+          ],
+        });
+        openingMessage =
+          resp.text.replace(/\blog-\d{4,}[-\w]*\b/gi, "").trim() ||
+          (nextNamingState === "pending"
+            ? `终于安顿下来了。我现在还挂着 Echore 这个暂用代号，${nextProfile.user_name}，以后多多指教。`
+            : `终于安顿下来了，我是${nextProfile.name}，${nextProfile.user_name}，以后多多指教。`);
+      }
+      assertNoInternalLeaks(openingMessage, "genesis.openingMessage");
+    } catch (err) {
+      restoreMemoryDirSnapshot(this.memoryDir, diskSnapshot);
+      throw err;
+    }
+
+    this.personaConfig = nextPersonaConfig;
+    this.profile = nextProfile;
+    this.genesisStatus = "completed";
+    this.namingMode = input.naming_mode;
+    this.namingState = nextNamingState;
+    this.initializedAt = nowIso;
+
+    let openingEvent!: EventLogRecord;
+    const initTx = this.db.sqlite.transaction(() => {
+      this.persistResidentState();
+      this.db.saveHormoneState(initHormones);
+      this.db.appendSystemLog({
+        actor: "user",
+        kind: "config_changed",
+        artifact: "genesis:init",
+        oldContent: prevSerialized,
+        newContent: JSON.stringify(this.profile),
+        reason: `Genesis 初始化完成 (mode=${input.naming_mode}, name=${this.profile.name}, user=${this.profile.user_name}, rel=${this.profile.relationship})`,
+        link: `${input.naming_mode}:${this.profile.dominant_archetype}`,
+      });
+      openingEvent = this.db.appendEventLog({
+        role: "assistant",
+        speaker: this.profile.name,
+        content: openingMessage,
+        timestamp: nowIso,
+        producer: "resident",
+        source: "chat",
+        metadata: {
+          proactive: true,
+          genesis_opening: true,
+        },
+      });
+    });
+    initTx();
+
+    syncMemoryMetaFromFiles({
+      memoryDir: this.memoryDir,
+      db: this.db,
+      now,
+    });
+
+    this.appendOnlyHistory.push({
+      role: "assistant",
+      content: openingMessage,
+    });
+
+    appendHotJournalEntry({
+      memoryDir: this.memoryDir,
+      dateStr: this.getCircadianDateStr(now),
+      timeStr: formatLocalTimeHm(now),
+      tag: "交互",
+      firstPersonText: `今天刚安顿下来，我主动跟${this.profile.user_name}打了第一声招呼：“${openingMessage.slice(0, 60)}”`,
+    });
+
+    return {
+      genesisStatus: this.genesisStatus,
+      namingMode: this.namingMode,
+      namingState: this.namingState,
+      profile: this.profile,
+      openingMessage,
+      openingEventId: openingEvent.id,
+      handover,
+      lintReport,
+    };
+  }
+
+  private renderGenesisMemoryFiles(
+    todayStr: string,
+    overrides?: {
+      profile?: ResolvedEndocrineProfile;
+      namingState?: NamingState;
+    },
+  ): void {
+    const profile = overrides?.profile ?? this.profile;
+    const namingState = overrides?.namingState ?? this.namingState;
+    const dirs = [
+      "people",
+      "events",
+      "concerns",
+      "implicit",
+      "solitary",
+      "journal",
+    ];
+    for (const d of dirs) {
+      fs.mkdirSync(path.join(this.memoryDir, d), { recursive: true });
+    }
+
+    const indexPath = path.join(this.memoryDir, "INDEX.md");
+    fs.writeFileSync(
+      indexPath,
+      [
+        "---",
+        "id: idx-root",
+        "type: 符号定义",
+        `date: ${todayStr}`,
+        "status: 有效",
+        "category: preference",
+        "allow_forget: false",
+        "---",
+        "",
+        "# Echore 记忆总目录 (L0)",
+        "",
+        "## 核心档案导航",
+        "- 住户自画像：[[people/self]]",
+        "- 陪伴对象档案：[[people/user]]",
+        "- 常驻内隐默契与关系雷区：[[implicit/rapport]]",
+        "",
+        "## 目录说明",
+        "- `people/`：唯一人物与实体符号定义表",
+        "- `events/`：生活事件与状态变更断言（带 `supersedes` 取代链）",
+        "- `concerns/`：牵挂注账本（分 `minor_worry` / `conflict` / `scar` 三级演化）",
+        "- `solitary/`：独居生活真实物证（阅读批注、跨天目标进度树、暗中准备备忘）",
+        "- `journal/`：第一人称白天热记事与睡前自省冷叙事",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const selfNarrative =
+      namingState === "pending"
+        ? `> 我刚刚醒来，现在暂时还用着 Echore 这个代号，还没正式名字，等之后和${profile.user_pronoun ?? "他"}相处时再一起取一个。`
+        : `> 我叫${profile.name}，在这里有自己的作息、阅读口味和脾气，不是随叫随到的客服应答机。`;
+
+    fs.writeFileSync(
+      path.join(this.memoryDir, "people", "self.md"),
+      [
+        "---",
+        "id: sym-people-self",
+        "type: 符号定义",
+        `date: ${todayStr}`,
+        "status: 有效",
+        "category: preference",
+        "allow_forget: false",
+        "---",
+        "",
+        "## 断言",
+        `- 身份([[people/self]]#姓名, ${profile.name})`,
+        "- 身份([[people/self]]#定位, 拥有独立日常节律与第一人称主权的陪伴住户)",
+        "- 当前状态([[people/self]]#生活状态, 日常平稳)",
+        "",
+        "## 前台原叙",
+        selfNarrative,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const userName = profile.user_name ?? "用户";
+    const userPronoun = profile.user_pronoun ?? "他";
+    const relationship = profile.relationship ?? "初识";
+
+    fs.writeFileSync(
+      path.join(this.memoryDir, "people", "user.md"),
+      [
+        "---",
+        "id: sym-people-user",
+        "type: 符号定义",
+        `date: ${todayStr}`,
+        "status: 有效",
+        "category: preference",
+        "allow_forget: false",
+        "---",
+        "",
+        "## 断言",
+        `- 称呼([[people/user]]#姓名, ${userName})`,
+        `- 代词([[people/user]]#代词, ${userPronoun})`,
+        `- 关系([[people/user]]#关系, ${relationship})`,
+        "- 当前状态([[people/user]]#近况, 正常运转)",
+        "",
+        "## 前台原叙",
+        `> ${userName}是我的${relationship}，我们平时各自忙完手头的事，回来聊聊今天遇到了什么。`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const rapportPath = path.join(this.memoryDir, "implicit", "rapport.md");
+    if (!fs.existsSync(rapportPath)) {
+      fs.writeFileSync(
+        rapportPath,
+        [
+          "---",
+          "id: imp-rapport",
+          "type: 内隐默契",
+          `date: ${todayStr}`,
+          "status: 有效",
+          "category: preference",
+          "allow_forget: false",
+          "---",
+          "",
+          "# 常驻内隐默契与关系雷区 (Rapport & Implicit Boundaries)",
+          "",
+          "## 专属称呼与黑话",
+          "",
+          "## 语感与边界默契",
+          "",
+          "## 结痂雷区",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+    }
+  }
+
   /**
    * 动态更新住户人设/内分泌原型（供性格测试台与领养流程实时切换），并写入 `system_log (config_changed)`
    */
@@ -523,10 +966,22 @@ export class EchoreEngine {
       resetHormonesToBaseline?: boolean;
       actor?: SystemLogActor;
       reason?: string;
+      settleNamingState?: boolean;
     },
   ): ResolvedEndocrineProfile {
     const prevSerialized = JSON.stringify(this.profile);
+    this.personaConfig = { ...persona };
     this.profile = resolvePersonaProfile(persona);
+    if (
+      options?.settleNamingState ||
+      (this.namingState === "pending" &&
+        this.profile.name &&
+        this.profile.name !== "Echore")
+    ) {
+      this.namingState = "settled";
+    }
+    this.persistResidentState();
+
     const nextSerialized = JSON.stringify(this.profile);
     if (prevSerialized !== nextSerialized) {
       this.db.appendSystemLog({
@@ -549,6 +1004,54 @@ export class EchoreEngine {
       this.db.saveHormoneState(resetHormones);
     }
     return this.profile;
+  }
+
+  private applyIdentityFileChange(change: IdentityFileChange): void {
+    const nextPersona: PersonaConfig = {
+      ...this.personaConfig,
+      ...(change.residentName ? { name: change.residentName } : {}),
+      ...(change.userName ? { user_name: change.userName } : {}),
+      ...(change.userPronoun ? { user_pronoun: change.userPronoun } : {}),
+      ...(change.relationship ? { relationship: change.relationship } : {}),
+    };
+    this.updatePersona(nextPersona, {
+      actor: "agent",
+      reason: `住户通过记忆文件 (${change.relPath}) 更新身份信息`,
+      settleNamingState: Boolean(change.residentName),
+    });
+  }
+
+  private syncIdentityFromMemoryFiles(): void {
+    const selfFile = parseStructuredMemoryFile(
+      this.memoryDir,
+      "people/self.md",
+    );
+    if (selfFile) {
+      const selfChange = extractIdentityChanges(
+        "people_self",
+        "people/self.md",
+        selfFile.body,
+        this.profile,
+      );
+      if (selfChange) {
+        this.applyIdentityFileChange(selfChange);
+      }
+    }
+    const userFile = parseStructuredMemoryFile(
+      this.memoryDir,
+      "people/user.md",
+    );
+    if (userFile) {
+      const userChange = extractIdentityChanges(
+        "people_user",
+        "people/user.md",
+        userFile.body,
+        this.profile,
+      );
+      if (userChange) {
+        this.applyIdentityFileChange(userChange);
+      }
+    }
   }
 
   /**
@@ -1062,6 +1565,7 @@ export class EchoreEngine {
     });
 
     // Step 4: [前台] 三明治缓存组装 + 第一人称实时对话演奏
+    this.turnJournalWrittenPaths.clear();
     const performance = await performFrontstageTurn({
       router: this.router,
       profile: this.profile,
@@ -1072,6 +1576,7 @@ export class EchoreEngine {
       recallResult: recalled,
       perceptionSlice: resolvedPerceptionSlice,
       secretPrepNote: resolvedSecretPrepNote,
+      namingState: this.namingState,
       latestUserMessage: userMessage,
       promptsDir: this.promptsDir,
     });
@@ -1103,15 +1608,32 @@ export class EchoreEngine {
       },
     });
 
-    // Step 5: 追加当日 journal/YYYY-MM-DD.md 第一人称热记事
+    // Step 5: 追加当日 journal/YYYY-MM-DD.md 第一人称热记事（若当轮住户已亲手通过工具写入当日日记则不重复追加）
     const circadianDateStr = this.getCircadianDateStr(now);
-    const journalEntry = appendHotJournalEntry({
-      memoryDir: this.memoryDir,
-      dateStr: circadianDateStr,
-      timeStr: formatLocalTimeHm(now),
-      tag: "交互",
-      firstPersonText: `今天和他就“${userMessage.slice(0, 30)}”聊了几句，我回他：“${performance.replyText.slice(0, 60)}”`,
-    });
+    const pronoun = this.profile.user_pronoun?.trim() || "他";
+    const targetJournalRel = `journal/${circadianDateStr}.md`;
+    let journalEntry: string;
+    if (this.turnJournalWrittenPaths.has(targetJournalRel)) {
+      const journalAbs = path.join(this.memoryDir, targetJournalRel);
+      const writtenLines = fs.existsSync(journalAbs)
+        ? fs
+            .readFileSync(journalAbs, "utf8")
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l && !l.startsWith("#"))
+        : [];
+      journalEntry =
+        writtenLines[writtenLines.length - 1] ??
+        `- [${formatLocalTimeHm(now)} · 交互] 今天和${pronoun}就“${userMessage.slice(0, 30)}”聊了几句，我回${pronoun}：“${performance.replyText.slice(0, 60)}”`;
+    } else {
+      journalEntry = appendHotJournalEntry({
+        memoryDir: this.memoryDir,
+        dateStr: circadianDateStr,
+        timeStr: formatLocalTimeHm(now),
+        tag: "交互",
+        firstPersonText: `今天和${pronoun}就“${userMessage.slice(0, 30)}”聊了几句，我回${pronoun}：“${performance.replyText.slice(0, 60)}”`,
+      });
+    }
 
     return {
       userEventId: userEvent.id,
@@ -1265,9 +1787,10 @@ export class EchoreEngine {
         now,
       });
 
+      const pronoun = this.profile.user_pronoun?.trim() || "他";
       const secretPrepNote = prepConcern
         ? extractSecretPrepForConcern(this.memoryDir, prepConcern.id) ??
-          `我之前趁空闲已经帮他查好了关于「${prepConcern.summary}」的备忘。`
+          `我之前趁空闲已经帮${pronoun}查好了关于「${prepConcern.summary}」的备忘。`
         : undefined;
 
       const perceptionParts = [
@@ -1303,7 +1826,7 @@ export class EchoreEngine {
           promptSections.push(`[当下环境与伴生观察]\n${perceptionParts.join("；")}`);
         }
         if (secretPrepNote) {
-          promptSections.push(`[我刚帮他准备好的备忘]\n${secretPrepNote}`);
+          promptSections.push(`[我刚帮${pronoun}准备好的备忘]\n${secretPrepNote}`);
         }
 
         const resp = await route.provider.generate({
@@ -1350,7 +1873,7 @@ export class EchoreEngine {
         dateStr,
         timeStr: formatLocalTimeHm(now),
         tag: "交互",
-        firstPersonText: `我主动找他说：“${proactiveMessage.slice(0, 60)}”`,
+        firstPersonText: `我主动找${pronoun}说：“${proactiveMessage.slice(0, 60)}”`,
       });
 
       // 注意：此处不提前抹除 prepConcern.has_prep（24h 主动冷却窗已由 recordProactiveSent 锁住），
@@ -1565,6 +2088,9 @@ export class EchoreEngine {
           ...compileResult.pendingSpineChange,
         });
       }
+
+      // 夜间双保险：若夜间编译器更新了 people/self.md 或 people/user.md 的姓名/称呼/代词/关系，同步至 resident_state
+      this.syncIdentityFromMemoryFiles();
 
       // Wave 5.1 睡眠环通过 L1~L7 机检后，增量回填新增/改写记忆的向量（外部网络异常安全降级，绝不触发睡眠环回滚）
       try {
@@ -2049,6 +2575,7 @@ export class EchoreEngine {
         appendOnlyHistory: historyBeforeLastTurn,
         handover,
         recallResult: recalled,
+        namingState: this.namingState,
         latestUserMessage: userQuery,
         promptsDir: this.promptsDir,
       });
