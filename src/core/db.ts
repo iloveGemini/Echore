@@ -49,6 +49,15 @@ export interface MemorySnapshotRecord {
   created_at: string;
 }
 
+export interface MemoryEmbeddingRecord {
+  memory_id: string;
+  model_key: string;
+  embedding_fingerprint: string;
+  embedding: number[];
+  dimensions: number;
+  updated_at: string;
+}
+
 export function resolveDataDir(explicitDir?: string): string {
   if (explicitDir) return explicitDir;
   if (process.env.ECHORE_DATA_DIR) {
@@ -176,6 +185,19 @@ export class EchoreDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_memory_snapshots_date
         ON memory_snapshots(sleep_date);
+
+      CREATE TABLE IF NOT EXISTS memory_embeddings (
+        memory_id TEXT NOT NULL,
+        model_key TEXT NOT NULL,
+        embedding_fingerprint TEXT NOT NULL,
+        embedding_json TEXT NOT NULL,
+        dimensions INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (memory_id, model_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_embeddings_model
+        ON memory_embeddings(model_key, updated_at DESC);
     `);
 
     const reflexRow = this.sqlite
@@ -788,6 +810,180 @@ export class EchoreDatabase {
 
   deleteMemoryMeta(id: string): void {
     this.sqlite.query(`DELETE FROM memory_meta WHERE id = ?`).run(id);
+    this.sqlite
+      .query(`DELETE FROM memory_embeddings WHERE memory_id = ?`)
+      .run(id);
+  }
+
+  upsertMemoryEmbedding(params: {
+    memoryId: string;
+    modelKey: string;
+    embeddingFingerprint: string;
+    embedding: number[];
+    updatedAtIso?: string;
+  }): void {
+    const updatedAt = params.updatedAtIso ?? this.clock.nowIso();
+    this.sqlite
+      .query(
+        `INSERT INTO memory_embeddings (memory_id, model_key, embedding_fingerprint, embedding_json, dimensions, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(memory_id, model_key) DO UPDATE SET
+           embedding_fingerprint = excluded.embedding_fingerprint,
+           embedding_json = excluded.embedding_json,
+           dimensions = excluded.dimensions,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        params.memoryId,
+        params.modelKey,
+        params.embeddingFingerprint,
+        JSON.stringify(params.embedding),
+        params.embedding.length,
+        updatedAt,
+      );
+  }
+
+  getMemoryEmbedding(
+    memoryId: string,
+    modelKey: string,
+    expectedFingerprint?: string,
+  ): MemoryEmbeddingRecord | null {
+    const row = this.sqlite
+      .query(
+        `SELECT memory_id, model_key, embedding_fingerprint, embedding_json, dimensions, updated_at
+         FROM memory_embeddings
+         WHERE memory_id = ? AND model_key = ?`,
+      )
+      .get(memoryId, modelKey) as {
+      memory_id: string;
+      model_key: string;
+      embedding_fingerprint: string;
+      embedding_json: string;
+      dimensions: number;
+      updated_at: string;
+    } | null;
+    if (!row) return null;
+    if (
+      expectedFingerprint !== undefined &&
+      row.embedding_fingerprint !== expectedFingerprint
+    ) {
+      return null;
+    }
+    return {
+      memory_id: row.memory_id,
+      model_key: row.model_key,
+      embedding_fingerprint: row.embedding_fingerprint,
+      embedding: JSON.parse(row.embedding_json) as number[],
+      dimensions: row.dimensions,
+      updated_at: row.updated_at,
+    };
+  }
+
+  listMemoryEmbeddingsByModel(
+    modelKey: string,
+  ): Map<string, MemoryEmbeddingRecord> {
+    const rows = this.sqlite
+      .query(
+        `SELECT memory_id, model_key, embedding_fingerprint, embedding_json, dimensions, updated_at
+         FROM memory_embeddings
+         WHERE model_key = ?`,
+      )
+      .all(modelKey) as Array<{
+      memory_id: string;
+      model_key: string;
+      embedding_fingerprint: string;
+      embedding_json: string;
+      dimensions: number;
+      updated_at: string;
+    }>;
+    const map = new Map<string, MemoryEmbeddingRecord>();
+    for (const row of rows) {
+      map.set(row.memory_id, {
+        memory_id: row.memory_id,
+        model_key: row.model_key,
+        embedding_fingerprint: row.embedding_fingerprint,
+        embedding: JSON.parse(row.embedding_json) as number[],
+        dimensions: row.dimensions,
+        updated_at: row.updated_at,
+      });
+    }
+    return map;
+  }
+
+  deleteStaleMemoryEmbeddings(
+    memoryId: string,
+    validFingerprint: string,
+  ): void {
+    this.sqlite
+      .query(
+        `DELETE FROM memory_embeddings
+         WHERE memory_id = ? AND embedding_fingerprint != ?`,
+      )
+      .run(memoryId, validFingerprint);
+  }
+
+  deleteMemoryEmbeddingsForId(memoryId: string): void {
+    this.sqlite
+      .query(`DELETE FROM memory_embeddings WHERE memory_id = ?`)
+      .run(memoryId);
+  }
+
+  listEmbeddingModels(): Array<{
+    model_key: string;
+    count: number;
+    last_updated_at: string;
+  }> {
+    return this.sqlite
+      .query(
+        `SELECT model_key, COUNT(*) AS count, MAX(updated_at) AS last_updated_at
+         FROM memory_embeddings
+         GROUP BY model_key
+         ORDER BY last_updated_at DESC, model_key ASC`,
+      )
+      .all() as Array<{
+      model_key: string;
+      count: number;
+      last_updated_at: string;
+    }>;
+  }
+
+  touchEmbeddingModel(modelKey: string, updatedAtIso?: string): void {
+    const ts = updatedAtIso ?? this.clock.nowIso();
+    this.sqlite
+      .query(`UPDATE memory_embeddings SET updated_at = ? WHERE model_key = ?`)
+      .run(ts, modelKey);
+  }
+
+  pruneOldEmbeddingModels(
+    keepMaxModels = 3,
+    preserveModelKey?: string,
+  ): number {
+    if (keepMaxModels <= 0) return 0;
+    const models = this.listEmbeddingModels();
+    if (models.length <= keepMaxModels) return 0;
+
+    const kept = new Set<string>();
+    if (preserveModelKey && models.some((m) => m.model_key === preserveModelKey)) {
+      kept.add(preserveModelKey);
+    }
+    for (const m of models) {
+      if (kept.size >= keepMaxModels) break;
+      kept.add(m.model_key);
+    }
+
+    const toDelete = models
+      .map((m) => m.model_key)
+      .filter((k) => !kept.has(k));
+    if (toDelete.length === 0) return 0;
+
+    let deletedRows = 0;
+    for (const key of toDelete) {
+      const res = this.sqlite
+        .query(`DELETE FROM memory_embeddings WHERE model_key = ?`)
+        .run(key);
+      deletedRows += res.changes;
+    }
+    return deletedRows;
   }
 
   getMemoryMeta(id: string): MemoryMetaRecord | null {

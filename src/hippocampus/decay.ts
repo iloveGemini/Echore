@@ -170,6 +170,9 @@ export function syncMemoryMetaForParsedFile(params: {
     const shouldClearEmbedding =
       existing.embedding_fingerprint !== undefined &&
       existing.embedding_fingerprint !== embeddingFingerprint;
+    if (shouldClearEmbedding) {
+      db.deleteStaleMemoryEmbeddings(f.frontmatter.id, embeddingFingerprint);
+    }
     const shouldClearAuditFingerprint =
       existing.audit_fingerprint !== undefined &&
       existing.audit_fingerprint !== auditFingerprint;
@@ -226,31 +229,45 @@ export function syncMemoryMetaFromFiles(params: {
 }
 
 export interface HydrateEmbeddingsReport {
+  modelKey?: string;
   embeddedIds: string[];
   skippedCount: number;
+  prunedModelsCount?: number;
 }
 
+export const DEFAULT_MAX_CACHED_EMBEDDING_MODELS = 3;
+
 /**
- * Wave 5.1 记忆向量增量回填：
- * - 先同步磁盘 `.md` 到 `memory_meta`（若 `when_to_recall` 或正文变更，`syncMemoryMetaFromFiles` 已自动清空旧 `embedding_json`）；
- * - 筛选活跃态（`有效` / `僵持待解`，排除 INDEX / rapport.md / people/）且 `embedding` 为空的记忆；
- * - 按 `buildMemoryEmbeddingText(file)` (`when_to_recall ? `${when_to_recall}\n${summary}` : summary`) 批量向量化并写回 `memory_meta`。
+ * Wave 5.1 记忆向量分模型增量回填：
+ * - 先同步磁盘 `.md` 到 `memory_meta`（若 `when_to_recall` 或正文变更，自动清理失效旧指纹向量缓存）；
+ * - 按 `router.getEmbeddingModelKey()` 查询 `memory_embeddings`，仅对当前模型缺失或指纹过期的活跃记忆补算向量；
+ * - 切回历史模型且文本未改时零消耗直接复用缓存；末尾按 LRU 保留最近 N 个模型（默认 3 个）。
  */
 export async function hydrateMissingMemoryEmbeddings(params: {
   memoryDir: string;
   db: EchoreDatabase;
   router?: OrganModelRouter;
   now: Date;
+  maxCachedModels?: number;
 }): Promise<HydrateEmbeddingsReport> {
-  const { memoryDir, db, router, now } = params;
-  if (!router?.getEmbeddingRoute()) {
+  const {
+    memoryDir,
+    db,
+    router,
+    now,
+    maxCachedModels = DEFAULT_MAX_CACHED_EMBEDDING_MODELS,
+  } = params;
+  const modelKey = router?.getEmbeddingModelKey();
+  if (!router?.getEmbeddingRoute() || !modelKey) {
     return { embeddedIds: [], skippedCount: 0 };
   }
 
   const files = syncMemoryMetaFromFiles({ memoryDir, db, now });
+  const existingByModel = db.listMemoryEmbeddingsByModel(modelKey);
   const pending: Array<{
     file: ParsedMemoryFile;
     meta: MemoryMetaRecord;
+    fingerprint: string;
     text: string;
   }> = [];
   let skippedCount = 0;
@@ -267,7 +284,16 @@ export async function hydrateMissingMemoryEmbeddings(params: {
     }
     const meta = db.getMemoryMeta(file.frontmatter.id);
     if (!meta) continue;
-    if (meta.embedding && meta.embedding.length > 0) {
+    const fingerprint = computeEmbeddingFingerprint(
+      file.frontmatter.when_to_recall,
+      file.body,
+    );
+    const cached = existingByModel.get(file.frontmatter.id);
+    if (
+      cached &&
+      cached.embedding_fingerprint === fingerprint &&
+      cached.embedding.length > 0
+    ) {
       skippedCount += 1;
       continue;
     }
@@ -276,16 +302,32 @@ export async function hydrateMissingMemoryEmbeddings(params: {
       skippedCount += 1;
       continue;
     }
-    pending.push({ file, meta, text });
+    pending.push({ file, meta, fingerprint, text });
   }
 
   if (pending.length === 0) {
-    return { embeddedIds: [], skippedCount };
+    if (skippedCount > 0) {
+      db.touchEmbeddingModel(modelKey, now.toISOString());
+    }
+    const prunedModelsCount = db.pruneOldEmbeddingModels(
+      maxCachedModels,
+      modelKey,
+    );
+    return {
+      modelKey,
+      embeddedIds: [],
+      skippedCount,
+      prunedModelsCount,
+    };
   }
 
   const vectors = await router.embedTexts(pending.map((p) => p.text));
   if (!vectors) {
-    return { embeddedIds: [], skippedCount: skippedCount + pending.length };
+    return {
+      modelKey,
+      embeddedIds: [],
+      skippedCount: skippedCount + pending.length,
+    };
   }
 
   const nowIso = now.toISOString();
@@ -297,15 +339,27 @@ export async function hydrateMissingMemoryEmbeddings(params: {
       skippedCount += 1;
       continue;
     }
+    db.upsertMemoryEmbedding({
+      memoryId: item.file.frontmatter.id,
+      modelKey,
+      embeddingFingerprint: item.fingerprint,
+      embedding: vec,
+      updatedAtIso: nowIso,
+    });
     db.upsertMemoryMeta({
       ...item.meta,
       embedding: vec,
+      embedding_fingerprint: item.fingerprint,
       updated_at: nowIso,
     });
     embeddedIds.push(item.file.frontmatter.id);
   }
 
-  return { embeddedIds, skippedCount };
+  const prunedModelsCount = db.pruneOldEmbeddingModels(
+    maxCachedModels,
+    modelKey,
+  );
+  return { modelKey, embeddedIds, skippedCount, prunedModelsCount };
 }
 
 /**

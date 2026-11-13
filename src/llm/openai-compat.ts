@@ -95,6 +95,10 @@ export class OpenAICompatAdapter implements LLMProvider, EmbeddingProvider {
   private readonly baseURL: string;
   private readonly fetchFn: typeof fetch;
 
+  get modelScope(): string {
+    return this.baseURL;
+  }
+
   constructor(options: OpenAICompatAdapterOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? "";
     this.baseURL = (

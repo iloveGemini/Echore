@@ -14,6 +14,7 @@ export interface OrganModelRoute {
 export interface EmbeddingModelRoute {
   provider: EmbeddingProvider;
   model: string;
+  modelKey?: string;
 }
 
 export type OrganRoutingTable = Record<OrganRole, OrganModelRoute>;
@@ -212,6 +213,17 @@ export class OrganModelRouter {
 
   setEmbeddingRoute(route: EmbeddingModelRoute | undefined): void {
     this.embeddingRoute = route;
+  }
+
+  getEmbeddingModelKey(): string | undefined {
+    if (!this.embeddingRoute) return undefined;
+    if (this.embeddingRoute.modelKey?.trim()) {
+      return this.embeddingRoute.modelKey.trim();
+    }
+    const scope = this.embeddingRoute.provider.modelScope?.trim();
+    return scope
+      ? `${this.embeddingRoute.provider.providerName}:${scope}:${this.embeddingRoute.model}`
+      : `${this.embeddingRoute.provider.providerName}:${this.embeddingRoute.model}`;
   }
 
   async embedTexts(texts: string[]): Promise<number[][] | null> {

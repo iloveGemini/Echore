@@ -93,6 +93,7 @@ export interface EmbeddingGenerateParams {
 
 export interface EmbeddingProvider {
   readonly providerName: string;
+  readonly modelScope?: string;
   embed(params: EmbeddingGenerateParams): Promise<number[][]>;
 }
 

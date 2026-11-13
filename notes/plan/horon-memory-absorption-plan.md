@@ -43,12 +43,16 @@
     1. 剥离套话前缀/泛化词（`/当?(?:日常|平时|随便|普通|一般)?(?:聊天|闲聊|对话|说话|聊到生活|提到用户|任何时候|每次对话)时?/gu`）及标点空白；
     2. 若剩余有效实词字符数 `< 4`，或整句长度 `< 6` / `> 120`，判定为无效泛化书腰，**直接丢弃置为 `undefined`**（不生成保底废话，宁缺毋滥）；
     3. `writeUpdatedFrontmatter`（`decay.ts:78`）写回 YAML 时保真保留合法的 `when_to_recall`。
-- **向量路径与词法打分契约 (`src/llm/` · `src/hippocampus/recall.ts` · `src/hippocampus/decay.ts` · `src/loop/engine.ts`)**：
-  1. **向量路径（`EmbeddingProvider` + 增量回填 + 实时查询嵌入）**：
-     - `src/llm/types.ts` 定义 `EmbeddingProvider`（`embed(texts, options): Promise<number[][]>`），`OpenAICompatAdapter` 实现 `POST ${baseURL}/embeddings`，`OrganModelRouter` 提供可选 `embedding` 槽位（支持 `ECHORE_EMBEDDING_MODEL` / `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` 或复用 `OPENAI_API_KEY`）；
-     - 记忆编码源文本由 `buildMemoryEmbeddingText(file)` 统一生成为 `when_to_recall ? `${when_to_recall}\n${summary}` : summary`；`syncMemoryMetaFromFiles`（`decay.ts`）以独立的 `embedding_fingerprint`（基于 `when_to_recall` 与正文哈希）判断变更并主动清空旧 `embedding_json`（纯 `status` 变更不误清空）；
-     - `hydrateMissingMemoryEmbeddings` 扫描活跃且 `embedding === undefined` 的记忆批量生成向量并写回 `memory_meta.embedding_json`（在 `runSleepCycle()` 通过 Linter 后自动增量执行，异常降级不阻断睡眠环）；
-     - `EchoreEngine.onUserMessage`（非空档时与 `verifyStanceCueWithOrgan` 并行，带超时降级）与 `POST /api/observatory/what-if`（在进入 `SAVEPOINT` 前同步点外完成）自动计算 `queryEmbedding` 传入 `recallMemories`。
+- **向量路径与词法打分契约 (`src/llm/` · `src/core/db.ts` · `src/hippocampus/recall.ts` · `src/hippocampus/decay.ts` · `src/loop/engine.ts`)**：
+  1. **向量路径（`EmbeddingProvider` + 分模型缓存表 `memory_embeddings` + 安全回退 + 增量回填）**：
+     - `src/llm/types.ts` 定义 `EmbeddingProvider`（`embed(params): Promise<number[][]>`，可选 `modelScope`），`OpenAICompatAdapter` 实现 `POST ${baseURL}/embeddings`，`OrganModelRouter` 提供可选 `embedding` 槽位及唯一模型键 `getEmbeddingModelKey()`（格式 `<provider>:<modelScope>:<model>`）；
+     - 记忆编码源文本由 `buildMemoryEmbeddingText(file)` 统一生成为 `when_to_recall ? `${when_to_recall}\n${summary}` : summary`；
+     - `src/core/db.ts` 维护分模型向量缓存表 `memory_embeddings(memory_id, model_key, embedding_fingerprint, embedding_json, dimensions, updated_at)`（主键 `(memory_id, model_key)`）：
+       - 磁盘正文或 `when_to_recall` 变更时，`syncMemoryMetaFromFiles` 自动清理该 `memory_id` 下指纹失效的所有旧缓存；
+       - 仅切换向量模型时**保留历史模型向量缓存**（默认 LRU 保留最近 3 个模型，`pruneOldEmbeddingModels(3)`），切回原模型且指纹未变时零 API 开销直接复用；
+     - `recallMemories` 启用 `embeddingModelKey` 时仅读取同 `model_key` 且指纹与维度完全匹配的向量；若当前模型向量尚未补齐或维度不匹配，**安全回退词法语义计算**（绝不跨向量空间硬算或归零）；
+     - `hydrateMissingMemoryEmbeddings` 扫描活跃且当前 `model_key` 缺失或指纹过期的记忆批量生成向量并写入 `memory_embeddings`（在 `runSleepCycle()` 通过 Linter 后自动增量执行，异常降级不阻断睡眠环）；
+     - `EchoreEngine.onUserMessage`（非空档时与 `verifyStanceCueWithOrgan` 并行，带超时降级）与 `POST /api/observatory/what-if`（在进入 `SAVEPOINT` 前同步点外完成）自动计算 `queryEmbedding` 与 `embeddingModelKey` 传入 `recallMemories`。
   2. **词法语义路径（当前默认生效路径）**：
      - 设查询与 `file.body` 的词袋余弦为 $S_{\text{body}} = \text{computeLexicalSemanticSimilarity}(\text{query}, \text{body})$；
      - 若存在 `when_to_recall`，计算书腰余弦 $S_{\text{cue}} = \text{computeLexicalSemanticSimilarity}(\text{query}, \text{when\_to\_recall})$，最终词法语义分定义为：

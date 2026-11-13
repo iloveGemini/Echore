@@ -3,7 +3,11 @@ import {
   formatVagueWhen,
   localCalendarDaysBetween,
 } from "../core/clock.ts";
-import type { EchoreDatabase } from "../core/db.ts";
+import type {
+  EchoreDatabase,
+  MemoryEmbeddingRecord,
+  MemoryMetaRecord,
+} from "../core/db.ts";
 import { PROMPTS_DIR, readPrompt } from "../core/prompts.ts";
 import {
   assertNoInternalLeaks,
@@ -15,6 +19,7 @@ import {
 import { extractHotEntriesForDate } from "../frontstage/journal.ts";
 import type { OrganModelRouter } from "../llm/router.ts";
 import {
+  computeEmbeddingFingerprint,
   loadStructuredMemoryFiles,
   type ParsedMemoryFile,
 } from "./linter.ts";
@@ -634,6 +639,7 @@ export function recallMemories(params: {
   now: Date;
   activeConcerns?: ConcernRecord[];
   queryEmbedding?: number[];
+  embeddingModelKey?: string;
   topK?: number;
   weights?: RecallWeights;
   recentSessionRecalledIds?: ReadonlySet<string>;
@@ -647,12 +653,42 @@ export function recallMemories(params: {
     now,
     activeConcerns = [],
     queryEmbedding,
+    embeddingModelKey,
     topK = 10,
     weights = DEFAULT_RECALL_WEIGHTS,
     recentSessionRecalledIds,
     excludeEventIds,
     stanceCueOverride,
   } = params;
+
+  const embeddingByMemoryId: Map<string, MemoryEmbeddingRecord> | null =
+    queryEmbedding && queryEmbedding.length > 0 && embeddingModelKey
+      ? db.listMemoryEmbeddingsByModel(embeddingModelKey)
+      : null;
+
+  const resolveCandidateEmbedding = (
+    file: ParsedMemoryFile,
+    meta: MemoryMetaRecord | null,
+  ): number[] | undefined => {
+    if (!queryEmbedding || queryEmbedding.length === 0) {
+      return undefined;
+    }
+    if (embeddingByMemoryId) {
+      const rec = embeddingByMemoryId.get(file.frontmatter.id);
+      if (!rec || rec.embedding.length !== queryEmbedding.length) {
+        return undefined;
+      }
+      const fp = computeEmbeddingFingerprint(
+        file.frontmatter.when_to_recall,
+        file.body,
+      );
+      return rec.embedding_fingerprint === fp ? rec.embedding : undefined;
+    }
+    if (meta?.embedding && meta.embedding.length === queryEmbedding.length) {
+      return meta.embedding;
+    }
+    return undefined;
+  };
 
   const idle = isIdleQuery(query);
   const bypassedSessionDedup = isExplicitReaskQuery(query);
@@ -720,10 +756,11 @@ export function recallMemories(params: {
     const timeScore = Math.pow(2, -ageHours / 72); // 72h half-life for recency feature
 
     const cueText = file.frontmatter.when_to_recall?.trim();
+    const candidateVec = resolveCandidateEmbedding(file, meta);
     let sem = 0;
     if (!idle) {
-      if (queryEmbedding && meta?.embedding) {
-        sem = cosineSimilarity(queryEmbedding, meta.embedding);
+      if (queryEmbedding && candidateVec) {
+        sem = cosineSimilarity(queryEmbedding, candidateVec);
       } else {
         const sBody = computeLexicalSemanticSimilarity(query, file.body);
         if (cueText) {
@@ -1158,9 +1195,10 @@ export function recallMemories(params: {
         const strength = meta?.strength ?? 0.12;
         const cueText = file.frontmatter.when_to_recall?.trim();
         const searchText = cueText ? `${cueText}\n${file.body}` : file.body;
+        const candidateVec = resolveCandidateEmbedding(file, meta);
         let sem: number;
-        if (queryEmbedding && meta?.embedding) {
-          sem = cosineSimilarity(queryEmbedding, meta.embedding);
+        if (queryEmbedding && candidateVec) {
+          sem = cosineSimilarity(queryEmbedding, candidateVec);
         } else {
           const sBody = computeLexicalSemanticSimilarity(query, file.body);
           if (cueText) {

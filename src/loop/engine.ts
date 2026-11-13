@@ -142,6 +142,7 @@ export interface WhatIfProbeScenario {
   userMessage?: string;
   fastForwardMinutes?: number;
   queryEmbedding?: number[];
+  embeddingModelKey?: string;
   stanceCueOverride?: boolean;
 }
 
@@ -772,6 +773,7 @@ export class EchoreEngine {
       now,
       activeConcerns: activeConcernsBefore,
       queryEmbedding,
+      embeddingModelKey: this.router.getEmbeddingModelKey(),
       recentSessionRecalledIds: new Set(this.recentSessionRecalledIds),
       excludeEventIds: new Set([userEvent.id]),
       stanceCueOverride,
@@ -1201,6 +1203,9 @@ export class EchoreEngine {
     const metaBackup = this.db.sqlite
       .query("SELECT * FROM memory_meta")
       .all() as Array<Record<string, unknown>>;
+    const embeddingsBackup = this.db.sqlite
+      .query("SELECT * FROM memory_embeddings")
+      .all() as Array<Record<string, unknown>>;
     const snapshotsBackup = this.db.sqlite
       .query("SELECT * FROM memory_snapshots")
       .all() as Array<Record<string, unknown>>;
@@ -1418,6 +1423,23 @@ export class EchoreEngine {
             );
         }
 
+        this.db.sqlite.exec("DELETE FROM memory_embeddings;");
+        for (const e of embeddingsBackup) {
+          this.db.sqlite
+            .query(
+              `INSERT INTO memory_embeddings (memory_id, model_key, embedding_fingerprint, embedding_json, dimensions, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              e.memory_id as string,
+              e.model_key as string,
+              e.embedding_fingerprint as string,
+              e.embedding_json as string,
+              e.dimensions as number,
+              e.updated_at as string,
+            );
+        }
+
         this.db.sqlite.exec("DELETE FROM memory_snapshots;");
         for (const s of snapshotsBackup) {
           this.db.sqlite
@@ -1457,7 +1479,12 @@ export class EchoreEngine {
         router: this.router,
       });
       if (queryEmbedding) {
-        return { ...scenario, queryEmbedding };
+        return {
+          ...scenario,
+          queryEmbedding,
+          embeddingModelKey:
+            scenario.embeddingModelKey ?? this.router.getEmbeddingModelKey(),
+        };
       }
     }
     return scenario;
@@ -1501,6 +1528,9 @@ export class EchoreEngine {
               now: probeNow,
               activeConcerns,
               queryEmbedding: scenario.queryEmbedding,
+              embeddingModelKey:
+                scenario.embeddingModelKey ??
+                this.router.getEmbeddingModelKey(),
               stanceCueOverride: scenario.stanceCueOverride,
               recentSessionRecalledIds: new Set(this.recentSessionRecalledIds),
             })

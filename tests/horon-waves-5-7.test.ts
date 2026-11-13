@@ -474,6 +474,169 @@ describe("Wave 5.1: 触发情境书腰 (when_to_recall)", () => {
     expect(whatIfHit?.scoreBreakdown.sem).toBeGreaterThan(0.95);
     expect(buildMemoryEmbeddingText).toBeFunction();
   });
+
+  test("multi-model embedding cache isolates models, falls back safely before re-indexing, reuses history on switchback, and prunes LRU", async () => {
+    const { memoryDir, clock, db } = createTempWorkspace("2026-11-13T16:00:00");
+    const ev = db.appendEventLog({
+      role: "user",
+      speaker: "user",
+      content: "记一下我喜欢用蓝山豆手冲",
+      timestamp: clock.nowIso(),
+    });
+    const relPath = "events/2026-11-13-blue-mountain.md";
+    writeStructuredFile({
+      memoryDir,
+      relPath,
+      id: "evt-blue-mountain",
+      date: "2026-11-13",
+      category: "preference",
+      sourceEventId: ev.id,
+      whenToRecall: "当聊到咖啡豆风味或手冲咖啡时",
+      assertions: ["偏好([[people/user]]#咖啡豆, 偏爱中浅烘蓝山咖啡手冲)"],
+      narrative: "他说平时最偏爱蓝山豆手冲出来的干净回甘。",
+    });
+
+    let modelACalls = 0;
+    let modelBCalls = 0;
+    let modelCCalls = 0;
+
+    const providerA = {
+      providerName: "openai-compat",
+      modelScope: "https://api.openai.com/v1",
+      async embed({ texts }: { texts: string[] }) {
+        modelACalls += 1;
+        return texts.map((t) =>
+          t.includes("咖啡") || t.includes("手冲") ? [1, 0, 0] : [0, 1, 0],
+        );
+      },
+    };
+    const providerB = {
+      providerName: "openai-compat",
+      modelScope: "https://api.siliconflow.cn/v1",
+      async embed({ texts }: { texts: string[] }) {
+        modelBCalls += 1;
+        // 4 维模型，与模型 A 的 3 维不兼容
+        return texts.map((t) =>
+          t.includes("咖啡") || t.includes("拿铁") ? [0, 1, 0, 0] : [1, 0, 0, 0],
+        );
+      },
+    };
+    const providerC = {
+      providerName: "ollama",
+      modelScope: "http://localhost:11434/v1",
+      async embed({ texts }: { texts: string[] }) {
+        modelCCalls += 1;
+        return texts.map(() => [0.5, 0.5]);
+      },
+    };
+
+    const mockChat = makeMockProvider(() => "{}");
+    const router = new OrganModelRouter({
+      defaultProvider: mockChat,
+      embedding: { provider: providerA, model: "text-embedding-3-small" },
+    });
+
+    // 1. 使用模型 A 全量填充
+    const resA = await hydrateMissingMemoryEmbeddings({
+      memoryDir,
+      db,
+      router,
+      now: clock.now(),
+    });
+    expect(resA.embeddedIds).toEqual(["evt-blue-mountain"]);
+    expect(modelACalls).toBe(1);
+
+    // 2. 切换至 4 维模型 B（尚未对记忆库重建向量）：查询绝不能因维度不同归零，应安全回退词法语义计算
+    router.setEmbeddingRoute({ provider: providerB, model: "BAAI/bge-m3" });
+    const recallBeforeReindex = recallMemories({
+      memoryDir,
+      db,
+      query: "手冲咖啡豆推荐",
+      now: clock.now(),
+      queryEmbedding: [0, 1, 0, 0],
+      embeddingModelKey: router.getEmbeddingModelKey(),
+    });
+    const fallbackHit = recallBeforeReindex.items.find(
+      (i) => i.id === "evt-blue-mountain",
+    );
+    expect(fallbackHit).toBeDefined();
+    expect(fallbackHit!.scoreBreakdown.sem).toBeGreaterThan(0.3);
+
+    // 3. 为模型 B 增量补全向量后，模型 A 与模型 B 各自独立存于 memory_embeddings
+    clock.advanceMinutes(10);
+    const resB = await hydrateMissingMemoryEmbeddings({
+      memoryDir,
+      db,
+      router,
+      now: clock.now(),
+    });
+    expect(resB.embeddedIds).toEqual(["evt-blue-mountain"]);
+    expect(modelBCalls).toBe(1);
+    expect(db.listEmbeddingModels().map((m) => m.model_key)).toHaveLength(2);
+
+    // 4. 切回模型 A：文本指纹未变，零 API 调用直接命中历史缓存！
+    clock.advanceMinutes(10);
+    router.setEmbeddingRoute({
+      provider: providerA,
+      model: "text-embedding-3-small",
+    });
+    const callsABeforeSwitchback = modelACalls;
+    const resBackA = await hydrateMissingMemoryEmbeddings({
+      memoryDir,
+      db,
+      router,
+      now: clock.now(),
+    });
+    expect(resBackA.embeddedIds).toHaveLength(0);
+    expect(resBackA.skippedCount).toBe(1);
+    expect(modelACalls).toBe(callsABeforeSwitchback);
+
+    // 验证切回后模型 A 依然可用其 3 维缓存向量召回
+    const recallAfterSwitchback = recallMemories({
+      memoryDir,
+      db,
+      query: "想喝手冲",
+      now: clock.now(),
+      queryEmbedding: [1, 0, 0],
+      embeddingModelKey: router.getEmbeddingModelKey(),
+    });
+    expect(
+      recallAfterSwitchback.items.find((i) => i.id === "evt-blue-mountain")
+        ?.scoreBreakdown.sem,
+    ).toBeCloseTo(1, 4);
+
+    // 5. 引入模型 C 且设置 maxCachedModels=2，最老未使用的模型 B 应被 LRU 修剪，保留最近活跃的 C 与 A
+    clock.advanceMinutes(10);
+    router.setEmbeddingRoute({ provider: providerC, model: "nomic-embed-text" });
+    await hydrateMissingMemoryEmbeddings({
+      memoryDir,
+      db,
+      router,
+      now: clock.now(),
+      maxCachedModels: 2,
+    });
+    expect(modelCCalls).toBe(1);
+    const remainingModels = db.listEmbeddingModels().map((m) => m.model_key);
+    expect(remainingModels).toHaveLength(2);
+    expect(remainingModels).toContain("ollama:http://localhost:11434/v1:nomic-embed-text");
+    expect(remainingModels).toContain("openai-compat:https://api.openai.com/v1:text-embedding-3-small");
+    expect(remainingModels).not.toContain("openai-compat:https://api.siliconflow.cn/v1:BAAI/bge-m3");
+
+    // 6. 改写磁盘记忆书腰后，所有剩余模型的失效指纹缓存均被清理
+    writeStructuredFile({
+      memoryDir,
+      relPath,
+      id: "evt-blue-mountain",
+      date: "2026-11-13",
+      category: "preference",
+      sourceEventId: ev.id,
+      whenToRecall: "当聊到意式浓缩与深烘咖啡豆时",
+      assertions: ["偏好([[people/user]]#咖啡豆, 偏爱中浅烘蓝山咖啡手冲)"],
+      narrative: "他说平时最偏爱蓝山豆手冲出来的干净回甘。",
+    });
+    syncMemoryMetaFromFiles({ memoryDir, db, now: clock.now() });
+    expect(db.listMemoryEmbeddingsByModel("ollama:http://localhost:11434/v1:nomic-embed-text").size).toBe(0);
+  });
 });
 
 describe("Wave 5.2: 时序共现注意力转移边 (memory_transitions)", () => {
